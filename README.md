@@ -6,7 +6,10 @@ timer. Four panels:
 
 1. **Usage** — your Claude usage limits (the same percentages Claude Code shows
    in settings: session / 5-hour and weekly), fetched live from the Anthropic
-   usage endpoint with your own OAuth token.
+   usage endpoint with your own OAuth token. Each bar also carries a **pace
+   marker** — an orange dashed tick placed where the elapsed fraction of
+   that limit's time window falls — so a glance tells you whether usage is
+   outrunning the clock (fill past the marker) or has headroom behind it.
 2. **Claude agents** — every Claude Code background job: name, live status,
    token count, when it last updated, and what it's doing. Read from
    `~/.claude/jobs/*/state.json`.
@@ -23,9 +26,9 @@ It is **read-only**: it never modifies jobs, files, or your token. Pure Python
  Agent Smith — node07.example                                              2026-06-24 12:00:00
 
   USAGE                                                                                    8s ago
-  Session (5h)    #######...............................  18%  resets in 1h 20m
-  Weekly (all)    ##....................................   5%  resets in 6d 13h
-  Weekly (Opus)   #.....................................   3%  resets in 6d 13h
+  Session (5h)    ###############|########..............  62%  resets in 3h 00m  +22% over pace
+  Weekly (all)    ########.......|......................  20%  resets in 4d 05h  20% headroom
+  Weekly (Opus)   ###################|..................  50%  resets in 3d 12h  on pace
 
   CLAUDE AGENTS                                                                            3 total
   name                   status         tokens updated     detail
@@ -51,7 +54,8 @@ It is **read-only**: it never modifies jobs, files, or your token. Pure Python
 ```
 
 (Bars render as solid Unicode blocks in a real terminal; shown here as `#`/`.`
-so the example is plain ASCII. Status colors: green `done`, yellow `running`,
+so the example is plain ASCII. The pace marker is an orange dashed tick (`╎`),
+shown here as `|`. Status colors: green `done`, yellow `running`,
 red `needs-prompt`, cyan `idle`. All names/users/values above are fictional.)
 
 ## Requirements

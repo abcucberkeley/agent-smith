@@ -57,6 +57,18 @@ EPOCH_UTC = datetime(1970, 1, 1, tzinfo=timezone.utc)  # sort fallback for jobs
 # terminal they may show as "?" (the rest of the dashboard still works).
 BLOCK_FULL = "█"   # full block
 BLOCK_LIGHT = "░"  # light shade
+PACE_GLYPH = "╎"   # dashed vertical tick: marks how far the clock is into a window
+
+# Length of each limit's rolling window, keyed by the `kind` the usage endpoint
+# reports. Used to place the "pace" marker on a bar -- i.e. what fraction of the
+# window's time has elapsed. A fill that runs ahead of this marker means you're
+# spending faster than the clock and will hit the cap before it resets.
+WINDOW_SECONDS = {
+    "session": 5 * 3600,          # rolling 5-hour session limit
+    "weekly_all": 7 * 86400,      # 7-day limits
+    "weekly_scoped": 7 * 86400,
+    "weekly_opus": 7 * 86400,
+}
 
 # ---------------------------------------------------------------------------
 # time helpers
@@ -110,6 +122,29 @@ def ago(iso):
     if not dt:
         return "?"
     return human_delta((datetime.now(timezone.utc) - dt).total_seconds()) + " ago"
+
+
+def seconds_until(iso):
+    """Seconds from now until ISO timestamp `iso`; negative if it's in the past,
+    None if the timestamp can't be parsed."""
+    dt = parse_iso(iso)
+    if not dt:
+        return None
+    return (dt - datetime.now(timezone.utc)).total_seconds()
+
+
+def pace_fraction(lim):
+    """Fraction (0.0-1.0) of a limit's window that has elapsed, or None when the
+    window length or reset time is unknown. `resets_at` is the end of the window,
+    so elapsed = window - time_remaining. Compare against the bar's fill: a fill
+    above this fraction means usage is outrunning the clock."""
+    window = WINDOW_SECONDS.get(lim.get("kind", ""))
+    if not window:
+        return None
+    remaining = seconds_until(lim.get("resets_at"))
+    if remaining is None:
+        return None
+    return max(0.0, min(1.0, (window - remaining) / float(window)))
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +432,7 @@ C_RED = 4
 C_CYAN = 5
 C_DIM = 6
 C_HEAD = 7
+C_ORANGE = 8
 
 
 def init_colors():
@@ -409,6 +445,13 @@ def init_colors():
     curses.init_pair(C_CYAN, curses.COLOR_CYAN, -1)
     curses.init_pair(C_DIM, curses.COLOR_WHITE, -1)
     curses.init_pair(C_HEAD, curses.COLOR_MAGENTA, -1)
+    # Orange for the pace marker. True orange needs a 256-color terminal (xterm
+    # color 208); fall back to yellow on 8/16-color terminals.
+    orange = 208 if curses.COLORS >= 256 else curses.COLOR_YELLOW
+    try:
+        curses.init_pair(C_ORANGE, orange, -1)
+    except curses.error:
+        curses.init_pair(C_ORANGE, curses.COLOR_YELLOW, -1)
 
 
 # Shared layout columns (character offsets) for the label+bar panels.
@@ -517,10 +560,39 @@ def draw_usage(scr, y, usage):
         sev = lim.get("severity", "normal")
         resets = resets_in(lim.get("resets_at"))
         rtxt = ("resets in %s" % resets) if resets else ""
+        frac = pace_fraction(lim)
         scr.addstr(y, LABEL_COL, label.ljust(LABEL_W), cp(C_DIM))
         scr.addstr(y, BAR_COL, bar(pct, barw), sev_color(sev))
+        # Overlay the pace marker at the time-elapsed position, on the same
+        # scale as the fill so the two read against each other directly: fill
+        # past the marker = spending faster than the clock.
+        if frac is not None:
+            mcol = max(0, min(barw - 1, int(round(barw * frac))))
+            try:
+                scr.addstr(y, BAR_COL + mcol, PACE_GLYPH,
+                           cp(C_ORANGE) | curses.A_BOLD)
+            except curses.error:
+                pass
         scr.addstr(y, BAR_COL + barw + 1, "%3d%%" % pct, sev_color(sev) | curses.A_BOLD)
-        scr.addstr(y, BAR_COL + barw + 6, rtxt, cp(C_DIM))
+        rx = BAR_COL + barw + 6
+        if rtxt:
+            scr.addstr(y, rx, rtxt, cp(C_DIM))
+            rx += len(rtxt) + 2
+        # Text cue: how far usage is ahead of / behind the clock, in points.
+        if frac is not None and rx < scr.w - 1:
+            over = pct - frac * 100.0
+            if over >= 1.0:
+                cue, ccol, bold = ("+%d%% over pace" % int(round(over)),
+                                   C_ORANGE, curses.A_BOLD)
+            elif over <= -1.0:
+                cue, ccol, bold = ("%d%% headroom" % int(round(-over)),
+                                   C_GREEN, 0)
+            else:
+                cue, ccol, bold = ("on pace", C_DIM, 0)
+            try:
+                scr.addstr(y, rx, cue[:scr.w - 1 - rx], cp(ccol) | bold)
+            except curses.error:
+                pass
         y += 1
         shown += 1
     if shown == 0:
