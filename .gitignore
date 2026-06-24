@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# agent-smith: never commit Claude credentials or local state
+.credentials.json
+.claude/
+*.log
