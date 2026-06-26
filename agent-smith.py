@@ -8,7 +8,8 @@ Four panels, refreshed on a timer:
                   OAuth token (read-only; the request only asks for your usage).
   2. Agents     - every Claude Code background job, read from
                   ~/.claude/jobs/<id>/state.json
-  3. SLURM      - your jobs from `squeue --me`
+  3. SLURM      - your `squeue --me` jobs: ones placed on nodes are listed with
+                  the nodes they're on; pending jobs collapse to an in-queue count
   4. Node       - htop-style CPU / memory / load / GPU + top processes for
                   whatever compute node this is running on.
 
@@ -702,29 +703,57 @@ def draw_jobs(scr, y, jobs, maxrows):
 
 
 def draw_squeue(scr, y, rows, maxrows):
-    """Draw the SLURM `squeue --me` table; return the next free row."""
+    """Draw the SLURM panel. Jobs actually placed on nodes get their own rows
+    (with the nodes they're running on); pending jobs are collapsed into a single
+    "in queue" summary, since their per-row "(Priority)" / "(Resources)" reasons
+    are rarely what you want to stare at -- the count and the why is enough.
+
+    The split key: squeue's %R is an actual nodelist for a placed job, but a
+    parenthesized reason (e.g. "(Resources)") for one still waiting."""
     if rows is None:
         y = section(scr, y, "  SLURM (squeue)")
         scr.addstr(y, 2, "squeue unavailable", cp(C_YELLOW))
         return y + 1
-    y = section(scr, y, "  SLURM (squeue --me)", "%d jobs" % len(rows))
-    scr.addstr(y, 2, "%-12s %-22s %-9s %-12s %-4s %s" %
-               ("jobid", "name", "state", "time", "n", "nodelist/reason"),
+    on_nodes, queued = [], []
+    for r in rows:
+        reason = r[5] if len(r) > 5 else ""
+        (queued if reason.startswith("(") else on_nodes).append(r)
+    right = "%d on nodes · %d queued" % (len(on_nodes), len(queued))
+    y = section(scr, y, "  SLURM (squeue --me)", right)
+    scr.addstr(y, 2, "%-11s %-22s %-10s %-11s %s" %
+               ("jobid", "name", "state", "time", "nodes"),
                cp(C_DIM) | curses.A_UNDERLINE)
     y += 1
-    if not rows:
+    if not on_nodes and not queued:
         scr.addstr(y, 2, "no queued or running jobs", cp(C_DIM))
         return y + 1
-    for r in rows[:maxrows]:
-        jid, name, st, tm, nodes, reason = r
-        col = state_attr(st)
-        scr.addstr(y, 2, "%-12s %-22s " % (jid[:12], name[:22]), curses.A_NORMAL)
-        scr.addstr(y, 39, st[:9].ljust(9), col)
-        scr.addstr(y, 49, "%-12s %-4s %s" % (tm[:12], nodes[:4], reason),
+    for r in on_nodes[:maxrows]:
+        jid, name, st, tm, ndcount, nodelist = r
+        scr.addstr(y, 2, "%-11s " % jid[:11], curses.A_NORMAL)
+        scr.addstr(y, 14, "%-22s " % name[:22], curses.A_NORMAL)
+        scr.addstr(y, 37, st[:10].ljust(10), state_attr(st))
+        scr.addstr(y, 48, "%-11s " % tm[:11], cp(C_DIM))
+        nd = nodelist or "-"
+        scr.addstr(y, 60, nd[:max(0, scr.w - 61)], cp(C_CYAN))
+        y += 1
+    if len(on_nodes) > maxrows:
+        scr.addstr(y, 2, "... %d more on nodes" % (len(on_nodes) - maxrows),
                    cp(C_DIM))
         y += 1
-    if len(rows) > maxrows:
-        scr.addstr(y, 2, "... %d more" % (len(rows) - maxrows), cp(C_DIM))
+    elif not on_nodes:
+        scr.addstr(y, 2, "no jobs on nodes", cp(C_DIM))
+        y += 1
+    if queued:
+        # Bundle the pending jobs into one line: total + a per-reason tally
+        # (most common first), e.g. "in queue: 5   (Priority 3, Resources 2)".
+        counts = {}
+        for r in queued:
+            reason = r[5].strip("()") or "pending"
+            counts[reason] = counts.get(reason, 0) + 1
+        tally = ", ".join("%s %d" % (k, v) for k, v in
+                          sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+        line = "in queue: %d   (%s)" % (len(queued), tally)
+        scr.addstr(y, 2, line[:max(0, scr.w - 3)], cp(C_YELLOW))
         y += 1
     return y + 1
 

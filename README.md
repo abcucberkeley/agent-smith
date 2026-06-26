@@ -13,7 +13,9 @@ timer. Four panels:
 2. **Claude agents** — every Claude Code background job: name, live status,
    token count, when it last updated, and what it's doing. Read from
    `~/.claude/jobs/*/state.json`.
-3. **SLURM** — your jobs from `squeue --me`.
+3. **SLURM** — your `squeue --me` jobs. Jobs that are actually placed get
+   their own row showing the node(s) they're running on; pending jobs are
+   collapsed into a single in-queue count with a per-reason breakdown.
 4. **Node** — htop-style CPU / memory / load / GPU plus the top processes for
    whatever machine it's running on.
 
@@ -36,10 +38,11 @@ It is **read-only**: it never modifies jobs, files, or your token. Pure Python
   data-pipeline           needs-prompt    8,102 4m ago      which reference dataset should I use?
   nightly-report          done           21,455 1h ago      report written to ./out/summary.md
 
-  SLURM (squeue --me)                                                                       2 jobs
-  jobid        name                   state     time         n    nodelist/reason
-  1234567      train                   RUNNING   02:14:03     1    node07.example
-  1234568      preprocess              PENDING   00:00:00     1    (Priority)
+  SLURM (squeue --me)                                                          2 on nodes · 3 queued
+  jobid       name                   state      time        nodes
+  1234567     train                   RUNNING    02:14:03    node07.example
+  1234571     segment                 COMPLETING 00:31:55    node07.example
+  in queue: 3   (Priority 2, Resources 1)
 
   NODE: node07.example                                                                     64 cores
   CPU   ####..................................  11.0%
