@@ -41,6 +41,7 @@ HOME = os.path.expanduser("~")
 # user (their own home/config) without edits.
 CONFIG_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude")
 JOBS_DIR = os.path.join(CONFIG_DIR, "jobs")
+PROJECTS_DIR = os.path.join(CONFIG_DIR, "projects")   # per-session transcripts
 CRED_PATH = os.path.join(CONFIG_DIR, ".credentials.json")
 
 REFRESH = 2.0            # seconds between UI redraws / local data samples
@@ -72,15 +73,24 @@ WINDOW_SECONDS = {
 }
 
 # "Theoretical cost" of Claude token usage, shown in the AGENTS panel. You're on
-# a subscription and are NOT billed per token -- this is a rough "what would this
-# cost at pay-as-you-go API rates" figure, for awareness only. Each job records
-# just one total token count (no input/output/cache split, no per-model info),
-# so an exact number is impossible: we apply a single blended Opus rate. The
-# totals also look to exclude cache reads, so treat it as directional, not a
-# bill. Tune COST_IN_FRAC / the rates below if your mix or model differs.
-COST_OPUS_IN = 5.0     # $ per 1M input tokens  (Opus 4.8)
-COST_OPUS_OUT = 25.0   # $ per 1M output tokens (Opus 4.8)
-COST_IN_FRAC = 0.8     # assumed input share of the total (agentic work leans input-heavy)
+# a subscription and are NOT billed per token -- this is a "what would this cost
+# at pay-as-you-go API rates" figure, for awareness only.
+#
+# We deliberately do NOT use the single rolled-up token count in state.json: that
+# field is a context-window snapshot (it climbs as the conversation fills and
+# DROPS on every compaction / restart-from-summary), not a lifetime total.
+# Instead we sum each turn's usage block from the session transcript, which
+# carries the full split -- fresh input, cache read, cache write, output -- and
+# price each at its own rate. Cache reads are ~10x cheaper than fresh input and
+# usually dominate the token count, so pricing the split is what makes this
+# honest rather than off by an order of magnitude.
+COST_OPUS_IN = 5.0      # $ / 1M fresh input tokens   (Opus 4.8)
+COST_OPUS_OUT = 25.0    # $ / 1M output tokens        (Opus 4.8)
+COST_CACHE_READ = 0.5   # $ / 1M cache-read tokens    (~0.1x input)
+COST_CACHE_WRITE = 6.25 # $ / 1M cache-write tokens   (~1.25x input, 5-min TTL)
+# Fallback only, for a job whose transcript can't be read: one blended rate on
+# the state.json snapshot. Directional -- the transcript path above is preferred.
+COST_IN_FRAC = 0.8
 COST_PER_MTOK = COST_IN_FRAC * COST_OPUS_IN + (1 - COST_IN_FRAC) * COST_OPUS_OUT  # ~$9/1M
 
 # ---------------------------------------------------------------------------
@@ -123,13 +133,20 @@ def human_delta(seconds):
     return "%s%ds" % (sign, s)
 
 
+def fmt_dollars(d):
+    """Format a dollar amount as a rough estimate: '~$2.1' / '~$62'.
+    '' for None (nothing to show)."""
+    if d is None:
+        return ""
+    return "~$%.1f" % d if d < 10 else "~$%d" % round(d)
+
+
 def fmt_cost(tokens):
-    """Rough 'at Opus API rates' dollar estimate for a token count (see
-    COST_PER_MTOK). Returns e.g. '~$2.1' / '~$25'; '' for a missing count."""
+    """Fallback estimate from a bare token count via the blended COST_PER_MTOK
+    (used only when a job's transcript can't be read for the exact split)."""
     if not isinstance(tokens, int):
         return ""
-    d = tokens / 1e6 * COST_PER_MTOK
-    return "~$%.1f" % d if d < 10 else "~$%d" % round(d)
+    return fmt_dollars(tokens / 1e6 * COST_PER_MTOK)
 
 
 def human_tokens(tokens):
@@ -266,6 +283,80 @@ class Usage(object):
 # claude agents / background jobs
 # ---------------------------------------------------------------------------
 
+# Per-session cost accounting. The single token count in state.json is a
+# context-window snapshot, not a lifetime total, so we sum each turn's usage
+# block from the session transcript (full input/output/cache split) and price
+# each category correctly. Transcripts are append-only JSONL and can be tens of
+# MB, so we cache per file and parse only the bytes appended since the last poll
+# -- after the first read, an idle/finished job costs one os.stat() per refresh.
+_cost_cache = {}    # transcript path -> {off, inp, cr, cc, out, cmp}
+_session_path = {}  # sessionId -> transcript path (resolved once)
+
+
+def _transcript_path(session_id):
+    """Locate a session's transcript JSONL under ~/.claude/projects/*/."""
+    if not session_id:
+        return None
+    if session_id in _session_path:
+        return _session_path[session_id]
+    hit = None
+    for p in glob.glob(os.path.join(PROJECTS_DIR, "*", session_id + ".jsonl")):
+        hit = p
+        break
+    if hit:                   # cache hits only; keep retrying misses (file may appear)
+        _session_path[session_id] = hit
+    return hit
+
+
+def agent_usage(session_id):
+    """Incrementally sum a session's transcript usage. Returns a dict of lifetime
+    {tokens, cost, compactions}, or None if no transcript is readable."""
+    path = _transcript_path(session_id)
+    if not path:
+        return None
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return None
+    c = _cost_cache.get(path)
+    if c is None or size < c["off"]:      # new file, or truncated/replaced -> reset
+        c = {"off": 0, "inp": 0, "cr": 0, "cc": 0, "out": 0, "cmp": 0}
+        _cost_cache[path] = c
+    if size > c["off"]:
+        try:
+            with open(path, "rb") as f:
+                f.seek(c["off"])
+                data = f.read()
+        except OSError:
+            data = b""
+        nl = data.rfind(b"\n")            # consume only whole lines; keep the tail
+        if nl >= 0:
+            chunk = data[:nl + 1]
+            c["off"] += len(chunk)
+            for line in chunk.split(b"\n"):
+                # cheap pre-filter: skip the many lines that carry no usage/marker
+                if b'"usage"' not in line and b'"isCompactSummary"' not in line:
+                    continue
+                try:
+                    e = json.loads(line.decode("utf-8", "replace"))
+                except Exception:
+                    continue
+                if e.get("isCompactSummary"):
+                    c["cmp"] += 1
+                msg = e.get("message")
+                u = msg.get("usage") if isinstance(msg, dict) else None
+                if not isinstance(u, dict):
+                    continue
+                c["inp"] += u.get("input_tokens") or 0
+                c["cr"] += u.get("cache_read_input_tokens") or 0
+                c["cc"] += u.get("cache_creation_input_tokens") or 0
+                c["out"] += u.get("output_tokens") or 0
+    cost = (c["inp"] / 1e6 * COST_OPUS_IN + c["cr"] / 1e6 * COST_CACHE_READ +
+            c["cc"] / 1e6 * COST_CACHE_WRITE + c["out"] / 1e6 * COST_OPUS_OUT)
+    return {"tokens": c["inp"] + c["cr"] + c["cc"] + c["out"],
+            "cost": cost, "compactions": c["cmp"]}
+
+
 def get_jobs():
     jobs = []
     for path in glob.glob(os.path.join(JOBS_DIR, "*", "state.json")):
@@ -275,6 +366,11 @@ def get_jobs():
         except Exception:
             continue
         d["_id"] = os.path.basename(os.path.dirname(path))
+        u = agent_usage(d.get("sessionId") or d.get("resumeSessionId"))
+        if u:
+            d["_life_tokens"] = u["tokens"]
+            d["_cost"] = u["cost"]
+            d["_compactions"] = u["compactions"]
         jobs.append(d)
 
     # Most-recently-updated first; jobs with no/invalid updatedAt sort last.
@@ -703,15 +799,28 @@ def agent_status(job):
 
 
 def draw_jobs(scr, y, jobs, maxrows):
-    """Draw the Claude background-agents table; return the next free row."""
-    # Grand total is over ALL jobs, not just the maxrows we have room to show.
-    total_tok = sum(j.get("tokens") for j in jobs
-                    if isinstance(j.get("tokens"), int))
-    right = "%d · %s tok · %s at Opus rates" % (
-        len(jobs), human_tokens(total_tok), fmt_cost(total_tok) or "~$0")
+    """Draw the Claude background-agents table; return the next free row.
+
+    tokens/cost are LIFETIME totals summed from each agent's transcript (priced
+    per category), not the context-window snapshot in state.json. `cmp` counts
+    how many times the agent was restarted-from-summary (auto-compacted)."""
+    # Totals are over ALL jobs, not just the maxrows we can show. Prefer the exact
+    # transcript-derived cost; fall back to the snapshot * blended rate only for a
+    # job whose transcript we couldn't read.
+    total_tok = 0
+    total_cost = 0.0
+    for j in jobs:
+        if "_cost" in j:
+            total_tok += j["_life_tokens"]
+            total_cost += j["_cost"]
+        elif isinstance(j.get("tokens"), int):
+            total_tok += j["tokens"]
+            total_cost += j["tokens"] / 1e6 * COST_PER_MTOK
+    right = "%d · %s tok · %s at API rates" % (
+        len(jobs), human_tokens(total_tok), fmt_dollars(total_cost) or "~$0")
     y = section(scr, y, "  CLAUDE AGENTS", right)
-    scr.addstr(y, 2, "%-22s %-12s %8s %7s %-11s %s" %
-               ("name", "status", "tokens", "cost", "updated", "detail"),
+    scr.addstr(y, 2, "%-20s %-12s %6s %7s %3s %-10s %s" %
+               ("name", "status", "tokens", "cost", "cmp", "updated", "detail"),
                cp(C_DIM) | curses.A_UNDERLINE)
     y += 1
     if not jobs:
@@ -721,19 +830,28 @@ def draw_jobs(scr, y, jobs, maxrows):
         name = (j.get("name") or j.get("_id") or "?")
         star = "*" if j.get("_id") == CUR_JOB else " "
         label, col = agent_status(j)
-        tokens = j.get("tokens")
-        tok = "{:,}".format(tokens) if isinstance(tokens, int) else "-"
-        cost = fmt_cost(tokens)
+        if "_cost" in j:                    # accurate: lifetime from the transcript
+            tok = human_tokens(j["_life_tokens"])
+            cost = fmt_dollars(j["_cost"])
+            ncmp = j.get("_compactions", 0)
+        else:                               # fallback: state.json snapshot
+            snap = j.get("tokens")
+            tok = human_tokens(snap) if isinstance(snap, int) else "-"
+            cost = fmt_cost(snap)
+            ncmp = 0
+        cmp_s = str(ncmp) if ncmp else ""
         upd = ago(j.get("updatedAt"))
         detail = (j.get("detail") or j.get("needs") or "").replace("\n", " ")
-        # columns: name@2(22) status@25(12) tokens@38(8) cost@47(7) updated@55(11) detail@67
+        # columns: name@2(20) status@23(12) tokens@36(6) cost@43(7) cmp@51(3)
+        #          updated@55(10) detail@66
         scr.addstr(y, 0, star, cp(C_CYAN) | curses.A_BOLD)
-        scr.addstr(y, 2, name[:22].ljust(22), curses.A_BOLD)
-        scr.addstr(y, 25, label[:12].ljust(12), col)
-        scr.addstr(y, 38, tok.rjust(8), cp(C_DIM))
-        scr.addstr(y, 47, cost.rjust(7), cp(C_GREEN))
-        scr.addstr(y, 55, upd[:11].ljust(11), cp(C_DIM))
-        scr.addstr(y, 67, detail, cp(C_DIM))
+        scr.addstr(y, 2, name[:20].ljust(20), curses.A_BOLD)
+        scr.addstr(y, 23, label[:12].ljust(12), col)
+        scr.addstr(y, 36, tok.rjust(6), cp(C_DIM))
+        scr.addstr(y, 43, cost.rjust(7), cp(C_GREEN))
+        scr.addstr(y, 51, cmp_s.rjust(3), cp(C_DIM))
+        scr.addstr(y, 55, upd[:10].ljust(10), cp(C_DIM))
+        scr.addstr(y, 66, detail, cp(C_DIM))
         y += 1
     if len(jobs) > maxrows:
         scr.addstr(y, 2, "... %d more" % (len(jobs) - maxrows), cp(C_DIM))

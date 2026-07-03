@@ -11,11 +11,16 @@ timer. Four panels:
    that limit's time window falls — so a glance tells you whether usage is
    outrunning the clock (fill past the marker) or has headroom behind it.
 2. **Claude agents** — every Claude Code background job: name, live status,
-   token count, a **theoretical cost** (what those tokens would run to at
-   pay-as-you-go Opus API rates — you're on a subscription, so it's an
-   awareness estimate, not a bill), when it last updated, and what it's doing.
+   lifetime **token count** and **theoretical cost** (what those tokens would
+   run to at pay-as-you-go Opus API rates — you're on a subscription, so it's an
+   awareness estimate, not a bill), a **cmp** count of how many times the agent
+   was restarted-from-summary (auto-compacted), when it last updated, and what
+   it's doing. Tokens and cost are summed per turn from each agent's session
+   transcript, pricing the full input / output / cache-read / cache-write split
+   separately — not the single rolled-up number in `state.json`, which is a
+   context-window snapshot (it drops on every compaction), not a lifetime total.
    The panel header sums tokens and cost across all agents. Read from
-   `~/.claude/jobs/*/state.json`.
+   `~/.claude/jobs/*/state.json` and `~/.claude/projects/*/<session>.jsonl`.
 3. **SLURM** — your `squeue --me` jobs. Jobs that are actually placed get
    their own row showing the node(s) they're running on; pending jobs are
    collapsed into a single in-queue count with a per-reason breakdown.
@@ -35,11 +40,11 @@ It is **read-only**: it never modifies jobs, files, or your token. Pure Python
   Weekly (all)    ########.......|......................  20%  resets in 4d 05h  20% headroom
   Weekly (Opus)   ###################|..................  50%  resets in 3d 12h  on pace
 
-  CLAUDE AGENTS                                                  3 · 1.7M tok · ~$16 at Opus rates
-  name                   status         tokens    cost updated     detail
-* analysis-dashboard     running       512,840   ~$4.6 3s ago      add a color legend to the status column
-  data-pipeline          needs-prompt  208,102   ~$1.9 4m ago      which reference dataset should I use?
-  nightly-report         done         1,021,455  ~$9.2 1h ago      report written to ./out/summary.md
+  CLAUDE AGENTS                                           3 · 117.7M tok · ~$83 at API rates
+  name                 status       tokens    cost cmp updated    detail
+* analysis-dashboard   running       24.6M    ~$18   2 3s ago     add a color legend to the status column
+  data-pipeline        needs-prompt   5.1M   ~$4.2     4m ago     which reference dataset should I use?
+  nightly-report       done          88.0M    ~$61   5 1h ago     report written to ./out/summary.md
 
   SLURM (squeue --me)                                                          2 on nodes · 3 queued
   jobid       name                   state      time        nodes
