@@ -71,6 +71,18 @@ WINDOW_SECONDS = {
     "weekly_opus": 7 * 86400,
 }
 
+# "Theoretical cost" of Claude token usage, shown in the AGENTS panel. You're on
+# a subscription and are NOT billed per token -- this is a rough "what would this
+# cost at pay-as-you-go API rates" figure, for awareness only. Each job records
+# just one total token count (no input/output/cache split, no per-model info),
+# so an exact number is impossible: we apply a single blended Opus rate. The
+# totals also look to exclude cache reads, so treat it as directional, not a
+# bill. Tune COST_IN_FRAC / the rates below if your mix or model differs.
+COST_OPUS_IN = 5.0     # $ per 1M input tokens  (Opus 4.8)
+COST_OPUS_OUT = 25.0   # $ per 1M output tokens (Opus 4.8)
+COST_IN_FRAC = 0.8     # assumed input share of the total (agentic work leans input-heavy)
+COST_PER_MTOK = COST_IN_FRAC * COST_OPUS_IN + (1 - COST_IN_FRAC) * COST_OPUS_OUT  # ~$9/1M
+
 # ---------------------------------------------------------------------------
 # time helpers
 # ---------------------------------------------------------------------------
@@ -109,6 +121,26 @@ def human_delta(seconds):
     if m:
         return "%s%dm" % (sign, m)
     return "%s%ds" % (sign, s)
+
+
+def fmt_cost(tokens):
+    """Rough 'at Opus API rates' dollar estimate for a token count (see
+    COST_PER_MTOK). Returns e.g. '~$2.1' / '~$25'; '' for a missing count."""
+    if not isinstance(tokens, int):
+        return ""
+    d = tokens / 1e6 * COST_PER_MTOK
+    return "~$%.1f" % d if d < 10 else "~$%d" % round(d)
+
+
+def human_tokens(tokens):
+    """Compact token count: 1_370_000 -> '1.4M', 230_000 -> '230k', else int."""
+    if not isinstance(tokens, int):
+        return "-"
+    if tokens >= 1000000:
+        return "%.1fM" % (tokens / 1e6)
+    if tokens >= 1000:
+        return "%dk" % (tokens // 1000)
+    return str(tokens)
 
 
 def resets_in(iso):
@@ -672,9 +704,14 @@ def agent_status(job):
 
 def draw_jobs(scr, y, jobs, maxrows):
     """Draw the Claude background-agents table; return the next free row."""
-    y = section(scr, y, "  CLAUDE AGENTS", "%d total" % len(jobs))
-    scr.addstr(y, 2, "%-22s %-12s %8s %-11s %s" %
-               ("name", "status", "tokens", "updated", "detail"),
+    # Grand total is over ALL jobs, not just the maxrows we have room to show.
+    total_tok = sum(j.get("tokens") for j in jobs
+                    if isinstance(j.get("tokens"), int))
+    right = "%d · %s tok · %s at Opus rates" % (
+        len(jobs), human_tokens(total_tok), fmt_cost(total_tok) or "~$0")
+    y = section(scr, y, "  CLAUDE AGENTS", right)
+    scr.addstr(y, 2, "%-22s %-12s %8s %7s %-11s %s" %
+               ("name", "status", "tokens", "cost", "updated", "detail"),
                cp(C_DIM) | curses.A_UNDERLINE)
     y += 1
     if not jobs:
@@ -686,15 +723,17 @@ def draw_jobs(scr, y, jobs, maxrows):
         label, col = agent_status(j)
         tokens = j.get("tokens")
         tok = "{:,}".format(tokens) if isinstance(tokens, int) else "-"
+        cost = fmt_cost(tokens)
         upd = ago(j.get("updatedAt"))
         detail = (j.get("detail") or j.get("needs") or "").replace("\n", " ")
-        # columns: name@2(w22) status@25(w12) tokens@38(w8) updated@47(w11) detail@59
+        # columns: name@2(22) status@25(12) tokens@38(8) cost@47(7) updated@55(11) detail@67
         scr.addstr(y, 0, star, cp(C_CYAN) | curses.A_BOLD)
         scr.addstr(y, 2, name[:22].ljust(22), curses.A_BOLD)
         scr.addstr(y, 25, label[:12].ljust(12), col)
         scr.addstr(y, 38, tok.rjust(8), cp(C_DIM))
-        scr.addstr(y, 47, upd[:11].ljust(11), cp(C_DIM))
-        scr.addstr(y, 59, detail, cp(C_DIM))
+        scr.addstr(y, 47, cost.rjust(7), cp(C_GREEN))
+        scr.addstr(y, 55, upd[:11].ljust(11), cp(C_DIM))
+        scr.addstr(y, 67, detail, cp(C_DIM))
         y += 1
     if len(jobs) > maxrows:
         scr.addstr(y, 2, "... %d more" % (len(jobs) - maxrows), cp(C_DIM))

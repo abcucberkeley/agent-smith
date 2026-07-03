@@ -11,7 +11,10 @@ timer. Four panels:
    that limit's time window falls — so a glance tells you whether usage is
    outrunning the clock (fill past the marker) or has headroom behind it.
 2. **Claude agents** — every Claude Code background job: name, live status,
-   token count, when it last updated, and what it's doing. Read from
+   token count, a **theoretical cost** (what those tokens would run to at
+   pay-as-you-go Opus API rates — you're on a subscription, so it's an
+   awareness estimate, not a bill), when it last updated, and what it's doing.
+   The panel header sums tokens and cost across all agents. Read from
    `~/.claude/jobs/*/state.json`.
 3. **SLURM** — your `squeue --me` jobs. Jobs that are actually placed get
    their own row showing the node(s) they're running on; pending jobs are
@@ -32,11 +35,11 @@ It is **read-only**: it never modifies jobs, files, or your token. Pure Python
   Weekly (all)    ########.......|......................  20%  resets in 4d 05h  20% headroom
   Weekly (Opus)   ###################|..................  50%  resets in 3d 12h  on pace
 
-  CLAUDE AGENTS                                                                            3 total
-  name                   status         tokens updated     detail
-* analysis-dashboard      running        12,840 3s ago      add a color legend to the status column
-  data-pipeline           needs-prompt    8,102 4m ago      which reference dataset should I use?
-  nightly-report          done           21,455 1h ago      report written to ./out/summary.md
+  CLAUDE AGENTS                                                  3 · 1.7M tok · ~$16 at Opus rates
+  name                   status         tokens    cost updated     detail
+* analysis-dashboard     running       512,840   ~$4.6 3s ago      add a color legend to the status column
+  data-pipeline          needs-prompt  208,102   ~$1.9 4m ago      which reference dataset should I use?
+  nightly-report         done         1,021,455  ~$9.2 1h ago      report written to ./out/summary.md
 
   SLURM (squeue --me)                                                          2 on nodes · 3 queued
   jobid       name                   state      time        nodes
