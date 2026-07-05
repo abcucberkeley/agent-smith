@@ -660,9 +660,17 @@ class Screen(object):
 
 
 def bar(pct, width):
-    """Return a `width`-char progress bar string for percentage `pct`."""
+    """Return a `width`-char progress bar string for percentage `pct`.
+
+    Floors the fill rather than rounding it: with round(), a 40-wide bar reads
+    completely full from 98.75% up, so 99% looks identical to a maxed-out 100%.
+    Flooring keeps at least one empty cell until a true 100%, so a near-cap limit
+    stays visibly distinct from an exhausted one. Any nonzero usage keeps at
+    least one filled cell so a sliver of usage never renders as empty."""
     pct = max(0.0, min(100.0, pct))
-    filled = int(round(width * pct / 100.0))
+    filled = int(width * pct / 100.0)
+    if pct > 0 and filled == 0:
+        filled = 1
     return BLOCK_FULL * filled + BLOCK_LIGHT * (width - filled)
 
 
