@@ -14,11 +14,14 @@ timer. Four panels:
    lifetime **token count** and **theoretical cost** (what those tokens would
    run to at pay-as-you-go Opus API rates — you're on a subscription, so it's an
    awareness estimate, not a bill), a **cmp** count of how many times the agent
-   was restarted-from-summary (auto-compacted), when it last updated, and what
-   it's doing. Tokens and cost are summed per turn from each agent's session
+   was restarted-from-summary (auto-compacted), the **model** it is currently
+   running (e.g. `opus-4.8`, `haiku-4.5` — taken from the most recent turn, since
+   a session can switch models mid-run), when it last updated, and what it's
+   doing. Tokens, cost, and model are all read per turn from each agent's session
    transcript, pricing the full input / output / cache-read / cache-write split
    separately — not the single rolled-up number in `state.json`, which is a
    context-window snapshot (it drops on every compaction), not a lifetime total.
+   (`state.json` carries no model at all — only the transcript records it.)
    The panel header sums tokens and cost across all agents. Read from
    `~/.claude/jobs/*/state.json` and `~/.claude/projects/*/<session>.jsonl`.
 3. **SLURM** — your `squeue --me` jobs. Jobs that are actually placed get
@@ -41,10 +44,10 @@ It is **read-only**: it never modifies jobs, files, or your token. Pure Python
   Weekly (Opus)   ###################|..................  50%  resets in 3d 12h  on pace
 
   CLAUDE AGENTS                                           3 · 117.7M tok · ~$83 at API rates
-  name                 status       tokens    cost cmp updated    detail
-* analysis-dashboard   running       24.6M    ~$18   2 3s ago     add a color legend to the status column
-  data-pipeline        needs-prompt   5.1M   ~$4.2     4m ago     which reference dataset should I use?
-  nightly-report       done          88.0M    ~$61   5 1h ago     report written to ./out/summary.md
+    name                 status       tokens    cost cmp model     updated    detail
+* analysis-dashboard   running       24.6M    ~$18   2 opus-4.8  3s ago     add a color legend to the status column
+  data-pipeline        needs-prompt   5.1M   ~$4.2     sonnet-5  4m ago     which reference dataset should I use?
+  nightly-report       done          88.0M    ~$61   5 haiku-4.5 1h ago     report written to ./out/summary.md
 
   SLURM (squeue --me)                                                          2 on nodes · 3 queued
   jobid       name                   state      time        nodes

@@ -149,6 +149,20 @@ def fmt_cost(tokens):
     return fmt_dollars(tokens / 1e6 * COST_PER_MTOK)
 
 
+def short_model(mid):
+    """Compact a model id for the table: 'claude-opus-4-8' -> 'opus-4.8',
+    'claude-haiku-4-5-20251001' -> 'haiku-4.5', 'claude-sonnet-5' -> 'sonnet-5'.
+    Unknown ids just lose the 'claude-' prefix and any trailing date stamp."""
+    if not mid:
+        return ""
+    s = mid[len("claude-"):] if mid.startswith("claude-") else mid
+    s = re.sub(r"-\d{6,}$", "", s)          # drop a trailing -20251001 style stamp
+    parts = s.split("-")
+    if len(parts) > 1:                      # family-a-b -> family-a.b
+        return parts[0] + "-" + ".".join(parts[1:])
+    return parts[0]
+
+
 def human_tokens(tokens):
     """Compact token count: 1_370_000 -> '1.4M', 230_000 -> '230k', else int."""
     if not isinstance(tokens, int):
@@ -320,7 +334,7 @@ def agent_usage(session_id):
         return None
     c = _cost_cache.get(path)
     if c is None or size < c["off"]:      # new file, or truncated/replaced -> reset
-        c = {"off": 0, "inp": 0, "cr": 0, "cc": 0, "out": 0, "cmp": 0}
+        c = {"off": 0, "inp": 0, "cr": 0, "cc": 0, "out": 0, "cmp": 0, "model": None}
         _cost_cache[path] = c
     if size > c["off"]:
         try:
@@ -344,6 +358,10 @@ def agent_usage(session_id):
                 if e.get("isCompactSummary"):
                     c["cmp"] += 1
                 msg = e.get("message")
+                if isinstance(msg, dict):
+                    mdl = msg.get("model")      # latest real model = current model
+                    if mdl and mdl != "<synthetic>":
+                        c["model"] = mdl
                 u = msg.get("usage") if isinstance(msg, dict) else None
                 if not isinstance(u, dict):
                     continue
@@ -354,7 +372,7 @@ def agent_usage(session_id):
     cost = (c["inp"] / 1e6 * COST_OPUS_IN + c["cr"] / 1e6 * COST_CACHE_READ +
             c["cc"] / 1e6 * COST_CACHE_WRITE + c["out"] / 1e6 * COST_OPUS_OUT)
     return {"tokens": c["inp"] + c["cr"] + c["cc"] + c["out"],
-            "cost": cost, "compactions": c["cmp"]}
+            "cost": cost, "compactions": c["cmp"], "model": c["model"]}
 
 
 def get_jobs():
@@ -371,6 +389,8 @@ def get_jobs():
             d["_life_tokens"] = u["tokens"]
             d["_cost"] = u["cost"]
             d["_compactions"] = u["compactions"]
+            if u["model"]:
+                d["_model"] = u["model"]
         jobs.append(d)
 
     # Most-recently-updated first; jobs with no/invalid updatedAt sort last.
@@ -819,8 +839,8 @@ def draw_jobs(scr, y, jobs, maxrows):
     right = "%d · %s tok · %s at API rates" % (
         len(jobs), human_tokens(total_tok), fmt_dollars(total_cost) or "~$0")
     y = section(scr, y, "  CLAUDE AGENTS", right)
-    scr.addstr(y, 2, "%-20s %-12s %6s %7s %3s %-10s %s" %
-               ("name", "status", "tokens", "cost", "cmp", "updated", "detail"),
+    scr.addstr(y, 2, "%-20s %-12s %6s %7s %3s %-9s %-10s %s" %
+               ("name", "status", "tokens", "cost", "cmp", "model", "updated", "detail"),
                cp(C_DIM) | curses.A_UNDERLINE)
     y += 1
     if not jobs:
@@ -840,18 +860,20 @@ def draw_jobs(scr, y, jobs, maxrows):
             cost = fmt_cost(snap)
             ncmp = 0
         cmp_s = str(ncmp) if ncmp else ""
+        model = short_model(j.get("_model"))
         upd = ago(j.get("updatedAt"))
         detail = (j.get("detail") or j.get("needs") or "").replace("\n", " ")
         # columns: name@2(20) status@23(12) tokens@36(6) cost@43(7) cmp@51(3)
-        #          updated@55(10) detail@66
+        #          model@55(9) updated@65(10) detail@76
         scr.addstr(y, 0, star, cp(C_CYAN) | curses.A_BOLD)
         scr.addstr(y, 2, name[:20].ljust(20), curses.A_BOLD)
         scr.addstr(y, 23, label[:12].ljust(12), col)
         scr.addstr(y, 36, tok.rjust(6), cp(C_DIM))
         scr.addstr(y, 43, cost.rjust(7), cp(C_GREEN))
         scr.addstr(y, 51, cmp_s.rjust(3), cp(C_DIM))
-        scr.addstr(y, 55, upd[:10].ljust(10), cp(C_DIM))
-        scr.addstr(y, 66, detail, cp(C_DIM))
+        scr.addstr(y, 55, model[:9].ljust(9), cp(C_CYAN))
+        scr.addstr(y, 65, upd[:10].ljust(10), cp(C_DIM))
+        scr.addstr(y, 76, detail, cp(C_DIM))
         y += 1
     if len(jobs) > maxrows:
         scr.addstr(y, 2, "... %d more" % (len(jobs) - maxrows), cp(C_DIM))
