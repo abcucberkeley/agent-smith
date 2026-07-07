@@ -181,6 +181,28 @@ def resets_in(iso):
     return human_delta((dt - datetime.now(timezone.utc)).total_seconds())
 
 
+def clock12(dt_local):
+    """'3pm', '9:46pm', '12:05am' -- 12-hour local clock, no leading zero,
+    minutes dropped when the time lands on the hour, lowercase am/pm."""
+    ampm = "am" if dt_local.hour < 12 else "pm"
+    h12 = dt_local.hour % 12 or 12
+    if dt_local.minute:
+        return "%d:%02d%s" % (h12, dt_local.minute, ampm)
+    return "%d%s" % (h12, ampm)
+
+
+def resets_when(iso):
+    """Absolute local wall-clock time a limit's window resets -- e.g. 'Fri 3pm'
+    or 'Sat 9:46pm'. '' if the timestamp can't be parsed. Uses the node's local
+    timezone via astimezone(); the dashboard is read on that same (Pacific) node,
+    so local time is what the user expects. Complements resets_in()'s countdown."""
+    d = parse_iso(iso)
+    if not d:
+        return ""
+    loc = d.astimezone()
+    return "%s %s" % (loc.strftime("%a"), clock12(loc))
+
+
 def ago(iso):
     dt = parse_iso(iso)
     if not dt:
@@ -724,7 +746,15 @@ def draw_usage(scr, y, usage):
         # No usage left: turn the row red, and treat pace specially (see below).
         exhausted = pct >= 100 or sev == "exceeded"
         resets = resets_in(lim.get("resets_at"))
-        rtxt = ("resets in %s" % resets) if resets else ""
+        when = resets_when(lim.get("resets_at"))
+        # Lead with the absolute wall-clock reset time (what the user asked to
+        # see), keep the countdown in parens as the at-a-glance "how long left".
+        if when and resets:
+            rtxt = "resets %s (%s)" % (when, resets)
+        elif resets:
+            rtxt = "resets in %s" % resets
+        else:
+            rtxt = ""
         frac = pace_fraction(lim)
         if exhausted:
             frac = _pace_frozen.setdefault(kind, frac)   # capture once, then hold
