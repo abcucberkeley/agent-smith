@@ -683,6 +683,12 @@ def section(scr, y, title, right=""):
     return y + 1
 
 
+# Once a limit is exhausted the clock keeps ticking but "pace" is meaningless, so
+# we snapshot the pace fraction the first frame we see it maxed and hold it there
+# (keyed by limit kind). Cleared when the limit resets and usage is available.
+_pace_frozen = {}
+
+
 def draw_usage(scr, y, usage):
     """Draw the usage-limit bars starting at row `y`; return the next free row."""
     data, err, fetched = usage.snapshot()
@@ -715,14 +721,24 @@ def draw_usage(scr, y, usage):
             label = "Weekly (%s)" % model
         pct = lim.get("percent", 0)
         sev = lim.get("severity", "normal")
+        # No usage left: turn the row red, and treat pace specially (see below).
+        exhausted = pct >= 100 or sev == "exceeded"
         resets = resets_in(lim.get("resets_at"))
         rtxt = ("resets in %s" % resets) if resets else ""
         frac = pace_fraction(lim)
-        scr.addstr(y, LABEL_COL, label.ljust(LABEL_W), cp(C_DIM))
-        scr.addstr(y, BAR_COL, bar(pct, barw), sev_color(sev))
+        if exhausted:
+            frac = _pace_frozen.setdefault(kind, frac)   # capture once, then hold
+            row_col = cp(C_RED) | curses.A_BOLD
+        else:
+            _pace_frozen.pop(kind, None)                  # usage returned -> resume
+            row_col = sev_color(sev)
+        scr.addstr(y, LABEL_COL, label.ljust(LABEL_W),
+                   row_col if exhausted else cp(C_DIM))
+        scr.addstr(y, BAR_COL, bar(pct, barw), row_col)
         # Overlay the pace marker at the time-elapsed position, on the same
         # scale as the fill so the two read against each other directly: fill
-        # past the marker = spending faster than the clock.
+        # past the marker = spending faster than the clock. Once exhausted this
+        # is the FROZEN position it held when we ran out -- it stops advancing.
         if frac is not None:
             mcol = max(0, min(barw - 1, int(round(barw * frac))))
             try:
@@ -730,13 +746,22 @@ def draw_usage(scr, y, usage):
                            cp(C_ORANGE) | curses.A_BOLD)
             except curses.error:
                 pass
-        scr.addstr(y, BAR_COL + barw + 1, "%3d%%" % pct, sev_color(sev) | curses.A_BOLD)
+        scr.addstr(y, BAR_COL + barw + 1, "%3d%%" % pct, row_col | curses.A_BOLD)
         rx = BAR_COL + barw + 6
         if rtxt:
             scr.addstr(y, rx, rtxt, cp(C_DIM))
             rx += len(rtxt) + 2
-        # Text cue: how far usage is ahead of / behind the clock, in points.
-        if frac is not None and rx < scr.w - 1:
+        if exhausted:
+            # Stop reporting pace once there's nothing left to pace against;
+            # say so plainly instead.
+            if rx < scr.w - 1:
+                try:
+                    scr.addstr(y, rx, "LIMIT REACHED"[:scr.w - 1 - rx],
+                               cp(C_RED) | curses.A_BOLD)
+                except curses.error:
+                    pass
+        elif frac is not None and rx < scr.w - 1:
+            # Text cue: how far usage is ahead of / behind the clock, in points.
             over = pct - frac * 100.0
             if over >= 1.0:
                 cue, ccol, bold = ("+%d%% over pace" % int(round(over)),

@@ -10,6 +10,9 @@ timer. Four panels:
    marker** — an orange dashed tick placed where the elapsed fraction of
    that limit's time window falls — so a glance tells you whether usage is
    outrunning the clock (fill past the marker) or has headroom behind it.
+   When a limit is **exhausted** (100%), the row turns red, the pace marker
+   **freezes** where it stood when you ran out (pace no longer applies), and
+   the cue reads **LIMIT REACHED** alongside the time until it resets.
 2. **Claude agents** — every Claude Code background job: name, live status,
    lifetime **token count** and **theoretical cost** (what those tokens would
    run to at pay-as-you-go Opus API rates — you're on a subscription, so it's an
