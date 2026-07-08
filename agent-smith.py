@@ -192,15 +192,18 @@ def clock12(dt_local):
 
 
 def resets_when(iso):
-    """Absolute local wall-clock time a limit's window resets -- e.g. 'Fri 3pm'
-    or 'Sat 9:46pm'. '' if the timestamp can't be parsed. Uses the node's local
+    """Absolute local reset time with weekday AND calendar date -- e.g.
+    'Fri Jul 11, 3pm' or 'Sat Jul 11, 9:46pm'. The date matters because a weekly
+    window can reset several days out, where a bare weekday ('Sat') still makes
+    you count. '' if the timestamp can't be parsed. Uses the node's local
     timezone via astimezone(); the dashboard is read on that same (Pacific) node,
     so local time is what the user expects. Complements resets_in()'s countdown."""
     d = parse_iso(iso)
     if not d:
         return ""
     loc = d.astimezone()
-    return "%s %s" % (loc.strftime("%a"), clock12(loc))
+    return "%s %s %d, %s" % (loc.strftime("%a"), loc.strftime("%b"),
+                             loc.day, clock12(loc))
 
 
 def ago(iso):

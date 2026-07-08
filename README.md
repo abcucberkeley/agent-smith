@@ -11,7 +11,8 @@ timer. Four panels:
    that limit's time window falls — so a glance tells you whether usage is
    outrunning the clock (fill past the marker) or has headroom behind it.
    Every row shows **when that window resets** as an absolute local
-   wall-clock time (e.g. `resets Fri 3pm`) with the countdown in parens
+   wall-clock time with weekday and date (e.g. `resets Fri Jul 11, 3pm`)
+   and the countdown in parens
    (`(4d 4h)`), so you know both the moment usage comes back and how long
    that is. When a limit is **exhausted** (100%), the row turns red, the
    pace marker **freezes** where it stood when you ran out (pace no longer
@@ -45,9 +46,9 @@ It is **read-only**: it never modifies jobs, files, or your token. Pure Python
  Agent Smith — node07.example                                              2026-06-24 12:00:00
 
   USAGE                                                                                    8s ago
-  Session (5h)    ###############|########..............  62%  resets Wed 3pm (3h 00m)  +22% over pace
-  Weekly (all)    ########.......|......................  20%  resets Sat 7am (4d 05h)  20% headroom
-  Weekly (Opus)   ###################|..................  50%  resets Fri 8pm (3d 12h)  on pace
+  Session (5h)    ###############|########..............  62%  resets Wed Jun 25, 3pm (3h 00m)  +22% over pace
+  Weekly (all)    ########.......|......................  20%  resets Sat Jun 28, 7am (4d 05h)  20% headroom
+  Weekly (Opus)   ###################|..................  50%  resets Fri Jun 27, 8pm (3d 12h)  on pace
 
   CLAUDE AGENTS                                           3 · 117.7M tok · ~$83 at API rates
     name                 status       tokens    cost cmp model     updated    detail
