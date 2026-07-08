@@ -708,6 +708,52 @@ def section(scr, y, title, right=""):
     return y + 1
 
 
+# ---------------------------------------------------------------------------
+# expand / collapse: each dynamic panel can be clicked (or keyed) open to show
+# every row instead of the capped preview. `_expanded` holds the per-panel state;
+# `_click_targets` is rebuilt every frame as a list of (row, x0, x1, key) hitboxes
+# that the main loop tests a mouse click against. Keys: "jobs", "slurm", "node".
+# ---------------------------------------------------------------------------
+_expanded = {"jobs": False, "slurm": False, "node": False}
+_click_targets = []
+
+
+def add_target(y, x0, x1, key):
+    """Register a clickable region [x0, x1) on row `y` that toggles panel `key`."""
+    _click_targets.append((y, x0, x1, key))
+
+
+def hit_target(mx, my):
+    """Return the panel key whose hitbox contains screen cell (mx, my), or None."""
+    for (ty, x0, x1, key) in _click_targets:
+        if my == ty and x0 <= mx < x1:
+            return key
+    return None
+
+
+def draw_toggle(scr, hy, title, key):
+    """Draw a [+]/[-] expander just after `title` on header row `hy` and register
+    it as a click target. [+] = collapsed (more to show), [-] = expanded."""
+    glyph = " [-]" if _expanded.get(key) else " [+]"
+    x = len(title)
+    scr.addstr(hy, x, glyph, cp(C_YELLOW) | curses.A_BOLD)
+    add_target(hy, x, x + len(glyph), key)
+
+
+def draw_more(scr, y, key, hidden):
+    """Draw the clickable expand/collapse line under a panel and register it.
+    `hidden` = rows not shown while collapsed. Returns the next free row."""
+    if _expanded.get(key):
+        txt = "  ▴ show fewer (click)"
+    elif hidden > 0:
+        txt = "  ▾ %d more (click to expand)" % hidden
+    else:
+        return y
+    scr.addstr(y, 2, txt, cp(C_YELLOW))
+    add_target(y, 2, 2 + len(txt), key)
+    return y + 1
+
+
 # Once a limit is exhausted the clock keeps ticking but "pace" is meaningless, so
 # we snapshot the pace fraction the first frame we see it maxed and hold it there
 # (keyed by limit kind). Cleared when the limit resets and usage is available.
@@ -904,7 +950,13 @@ def draw_jobs(scr, y, jobs, maxrows):
             total_cost += j["tokens"] / 1e6 * COST_PER_MTOK
     right = "%d · %s tok · %s at API rates" % (
         len(jobs), human_tokens(total_tok), fmt_dollars(total_cost) or "~$0")
-    y = section(scr, y, "  CLAUDE AGENTS", right)
+    title = "  CLAUDE AGENTS"
+    hy = y
+    y = section(scr, y, title, right)
+    hidden = max(0, len(jobs) - maxrows)
+    limit = len(jobs) if _expanded["jobs"] else maxrows
+    if hidden > 0 or _expanded["jobs"]:
+        draw_toggle(scr, hy, title, "jobs")
     scr.addstr(y, 2, "%-20s %-12s %6s %7s %3s %-9s %-10s %s" %
                ("name", "status", "tokens", "cost", "cmp", "model", "updated", "detail"),
                cp(C_DIM) | curses.A_UNDERLINE)
@@ -912,7 +964,7 @@ def draw_jobs(scr, y, jobs, maxrows):
     if not jobs:
         scr.addstr(y, 2, "no background jobs", cp(C_DIM))
         return y + 1
-    for j in jobs[:maxrows]:
+    for j in jobs[:limit]:
         name = (j.get("name") or j.get("_id") or "?")
         star = "*" if j.get("_id") == CUR_JOB else " "
         label, col = agent_status(j)
@@ -941,9 +993,7 @@ def draw_jobs(scr, y, jobs, maxrows):
         scr.addstr(y, 65, upd[:10].ljust(10), cp(C_DIM))
         scr.addstr(y, 76, detail, cp(C_DIM))
         y += 1
-    if len(jobs) > maxrows:
-        scr.addstr(y, 2, "... %d more" % (len(jobs) - maxrows), cp(C_DIM))
-        y += 1
+    y = draw_more(scr, y, "jobs", hidden)
     return y + 1
 
 
@@ -964,7 +1014,13 @@ def draw_squeue(scr, y, rows, maxrows):
         reason = r[5] if len(r) > 5 else ""
         (queued if reason.startswith("(") else on_nodes).append(r)
     right = "%d on nodes · %d queued" % (len(on_nodes), len(queued))
-    y = section(scr, y, "  SLURM (squeue --me)", right)
+    title = "  SLURM (squeue --me)"
+    hy = y
+    y = section(scr, y, title, right)
+    hidden = max(0, len(on_nodes) - maxrows)
+    limit = len(on_nodes) if _expanded["slurm"] else maxrows
+    if hidden > 0 or _expanded["slurm"]:
+        draw_toggle(scr, hy, title, "slurm")
     scr.addstr(y, 2, "%-11s %-22s %-10s %-11s %s" %
                ("jobid", "name", "state", "time", "nodes"),
                cp(C_DIM) | curses.A_UNDERLINE)
@@ -972,7 +1028,7 @@ def draw_squeue(scr, y, rows, maxrows):
     if not on_nodes and not queued:
         scr.addstr(y, 2, "no queued or running jobs", cp(C_DIM))
         return y + 1
-    for r in on_nodes[:maxrows]:
+    for r in on_nodes[:limit]:
         jid, name, st, tm, ndcount, nodelist = r
         scr.addstr(y, 2, "%-11s " % jid[:11], curses.A_NORMAL)
         scr.addstr(y, 14, "%-22s " % name[:22], curses.A_NORMAL)
@@ -981,13 +1037,11 @@ def draw_squeue(scr, y, rows, maxrows):
         nd = nodelist or "-"
         scr.addstr(y, 60, nd[:max(0, scr.w - 61)], cp(C_CYAN))
         y += 1
-    if len(on_nodes) > maxrows:
-        scr.addstr(y, 2, "... %d more on nodes" % (len(on_nodes) - maxrows),
-                   cp(C_DIM))
-        y += 1
-    elif not on_nodes:
+    if not on_nodes:
         scr.addstr(y, 2, "no jobs on nodes", cp(C_DIM))
         y += 1
+    else:
+        y = draw_more(scr, y, "slurm", hidden)
     if queued:
         # Bundle the pending jobs into one line: total + a per-reason tally
         # (most common first), e.g. "in queue: 5   (Priority 3, Resources 2)".
@@ -1003,9 +1057,21 @@ def draw_squeue(scr, y, rows, maxrows):
     return y + 1
 
 
-def draw_node(scr, y, node, cpu_pct, host, maxprocs):
-    """Draw the node CPU/MEM/load/GPU bars and the top-process table."""
-    y = section(scr, y, "  NODE: %s" % host, "%d cores" % NCPU)
+NODE_PROCS_COLLAPSED = 14   # top-process rows shown before the panel is expanded
+
+
+def draw_node(scr, y, node, cpu_pct, host, proc_avail):
+    """Draw the node CPU/MEM/load/GPU bars and the top-process table.
+
+    `proc_avail` is how many process rows fit between here and the footer. While
+    collapsed we cap the list at NODE_PROCS_COLLAPSED; expanded, we fill the space
+    (a [+] appears on the header only when there's actually more room to fill)."""
+    title = "  NODE: %s" % host
+    hy = y
+    y = section(scr, y, title, "%d cores" % NCPU)
+    if proc_avail > NODE_PROCS_COLLAPSED or _expanded["node"]:
+        draw_toggle(scr, hy, title, "node")
+    nprocs = proc_avail if _expanded["node"] else min(NODE_PROCS_COLLAPSED, proc_avail)
     barw = max(10, min(40, scr.w - 30))
 
     scr.addstr(y, 2, "CPU".ljust(6), cp(C_DIM))
@@ -1049,7 +1115,7 @@ def draw_node(scr, y, node, cpu_pct, host, maxprocs):
                ("pid", "user", "cpu%", "mem", "command"),
                cp(C_DIM) | curses.A_UNDERLINE)
     y += 1
-    for p in node.top_procs(maxprocs):
+    for p in node.top_procs(nprocs):
         if y >= scr.h - 1:        # never draw over the footer row
             break
         scr.addstr(y, 2, "%-7s %-10s %6.1f %8.0fM  %s" %
@@ -1068,6 +1134,13 @@ def main(stdscr):
     curses.curs_set(0)
     init_colors()
     stdscr.nodelay(True)
+    # Enable single-click reporting so the [+]/[-] expanders are clickable. Best
+    # effort: terminals without mouse support (or tmux without `mouse on`) just
+    # never send events, and the 1/2/3 keys still toggle the same panels.
+    try:
+        curses.mousemask(curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED)
+    except curses.error:
+        pass
     # snapshot mode: force a full repaint each frame so a screen capture has no
     # incremental-diff artifacts. Off by default to keep the live UI flicker-free.
     snapshot = bool(os.environ.get("AGENT_SMITH_SNAPSHOT"))
@@ -1094,12 +1167,29 @@ def main(stdscr):
             last = 0.0
         if ch == curses.KEY_RESIZE:
             last = 0.0
+        # 1/2/3 toggle the agents / slurm / node panels open (keyboard fallback
+        # for the clickable [+]/[-]); force an immediate repaint on any toggle.
+        if ch in (ord("1"), ord("2"), ord("3")):
+            _expanded[{"1": "jobs", "2": "slurm", "3": "node"}[chr(ch)]] ^= True
+            last = 0.0
+        if ch == curses.KEY_MOUSE:
+            try:
+                _mid, mx, my, _mz, bstate = curses.getmouse()
+            except curses.error:
+                bstate = 0
+                mx = my = -1
+            if bstate & (curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED):
+                key = hit_target(mx, my)
+                if key:
+                    _expanded[key] ^= True
+                    last = 0.0
 
         now = time.time()
         if now - last >= REFRESH:
             last = now
             stdscr.erase()
             scr = Screen(stdscr)
+            del _click_targets[:]        # rebuilt below by the panels that draw them
 
             clock = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             title = " Agent Smith — %s " % host
@@ -1121,10 +1211,11 @@ def main(stdscr):
             y = draw_jobs(scr, y, jobs, job_rows)
             y = draw_squeue(scr, y, sq, sq_rows)
 
-            proc_room = max(2, min(14, scr.h - y - 2))
-            draw_node(scr, y, node, cpu_pct, host, proc_room)
+            proc_avail = max(2, scr.h - y - 2)
+            draw_node(scr, y, node, cpu_pct, host, proc_avail)
 
-            footer = " q quit   r refresh   *=this session   updates %ds " % int(REFRESH)
+            footer = (" q quit   r refresh   1·2·3 or click [+] expand   "
+                      "*=this session   updates %ds " % int(REFRESH))
             scr.addstr(scr.h - 1, 0, footer.ljust(scr.w),
                        cp(C_TITLE))
             if snapshot:

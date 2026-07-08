@@ -50,11 +50,12 @@ It is **read-only**: it never modifies jobs, files, or your token. Pure Python
   Weekly (all)    ########.......|......................  20%  resets Sat Jun 28, 7am (4d 05h)  20% headroom
   Weekly (Opus)   ###################|..................  50%  resets Fri Jun 27, 8pm (3d 12h)  on pace
 
-  CLAUDE AGENTS                                           3 · 117.7M tok · ~$83 at API rates
+  CLAUDE AGENTS [+]                                       5 · 117.7M tok · ~$83 at API rates
     name                 status       tokens    cost cmp model     updated    detail
 * analysis-dashboard   running       24.6M    ~$18   2 opus-4.8  3s ago     add a color legend to the status column
   data-pipeline        needs-prompt   5.1M   ~$4.2     sonnet-5  4m ago     which reference dataset should I use?
   nightly-report       done          88.0M    ~$61   5 haiku-4.5 1h ago     report written to ./out/summary.md
+    ▾ 2 more (click to expand)
 
   SLURM (squeue --me)                                                          2 on nodes · 3 queued
   jobid       name                   state      time        nodes
@@ -71,13 +72,16 @@ It is **read-only**: it never modifies jobs, files, or your token. Pure Python
   204815  alice         98.4     1240M  python
   204902  bob           42.1      512M  matlab
   ...
- q quit   r refresh   *=this session   updates 2s
+ q quit   r refresh   1·2·3 or click [+] expand   *=this session   updates 2s
 ```
 
 (Bars render as solid Unicode blocks in a real terminal; shown here as `#`/`.`
 so the example is plain ASCII. The pace marker is an orange dashed tick (`╎`),
 shown here as `|`. Status colors: green `done`, yellow `running`,
-red `needs-prompt`, cyan `idle`. All names/users/values above are fictional.)
+red `needs-prompt`, cyan `idle`. The `[+]` after a panel title (and the
+`▾ N more` line) expands that panel to show every row — click it, or press
+`1`/`2`/`3` for Agents/SLURM/Node; `[-]` / `▴` collapses it again. All
+names/users/values above are fictional.)
 
 ## Requirements
 
@@ -113,7 +117,11 @@ tmux new -s smith 'python3 agent-smith.py'
 # detach: Ctrl-b d   reattach: tmux attach -t smith
 ```
 
-**Controls:** `q` quit, `r` force a refresh. The window resizes automatically.
+**Controls:** `q` quit, `r` force a refresh. Click a panel's `[+]` / `▾ N more`
+(or press `1`/`2`/`3` for the Agents / SLURM / Node panels) to expand it and
+show every row; click again to collapse. Mouse clicks need a terminal with
+mouse reporting (under `tmux`, `set -g mouse on`); the number keys always
+work. The window resizes automatically.
 
 ## How it adapts to each user
 
