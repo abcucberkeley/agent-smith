@@ -2,7 +2,7 @@
 """
 Agent Smith - a read-only terminal dashboard.
 
-Four panels, refreshed on a timer:
+Five panels, refreshed on a timer:
   1. Usage      - your Claude usage limits (same numbers as the settings bar),
                   fetched live from the Anthropic usage endpoint with your own
                   OAuth token (read-only; the request only asks for your usage).
@@ -10,7 +10,10 @@ Four panels, refreshed on a timer:
                   ~/.claude/jobs/<id>/state.json
   3. SLURM      - your `squeue --me` jobs: ones placed on nodes are listed with
                   the nodes they're on; pending jobs collapse to an in-queue count
-  4. Node       - htop-style CPU / memory / load / GPU + top processes for
+  4. Storage    - a usage bar per shared cluster filesystem (the /clusterfs
+                  pools), df'd on a background thread so a hung mount can't stall
+                  the UI; shows which pool is filling up.
+  5. Node       - htop-style CPU / memory / load / GPU + top processes for
                   whatever compute node this is running on.
 
 Pure stdlib (curses). No pip installs. Works on Python 3.6+.
@@ -47,6 +50,9 @@ CRED_PATH = os.path.join(CONFIG_DIR, ".credentials.json")
 REFRESH = 2.0            # seconds between UI redraws / local data samples
 USAGE_REFRESH = 120.0    # seconds between (slow, networked) usage fetches
 USAGE_BACKOFF = 300.0    # seconds to wait after the usage endpoint rate-limits us
+STORAGE_REFRESH = 30.0   # seconds between df samples of the cluster filesystems
+STORAGE_TIMEOUT = 8.0    # per-mount df timeout so a hung NFS pool can't stall us
+STORAGE_PREFIXES = ("/clusterfs",)  # mountpoint prefixes treated as cluster storage
 CLK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
 PAGE_KB = (os.sysconf("SC_PAGE_SIZE") // 1024) if hasattr(os, "sysconf") else 4
 NCPU = os.cpu_count() or 1
@@ -172,6 +178,18 @@ def human_tokens(tokens):
     if tokens >= 1000:
         return "%dk" % (tokens // 1000)
     return str(tokens)
+
+
+def human_bytes(n):
+    """Compact byte size in base-1024 units, like `df -h`: 512K, 18T, 3.5P.
+    One decimal below 100, none above, so the storage bars stay aligned."""
+    n = float(n)
+    for unit in ("B", "K", "M", "G", "T", "P"):
+        if n < 1024.0 or unit == "P":
+            if unit in ("B", "K", "M") or n >= 100:
+                return "%.0f%s" % (n, unit)
+            return "%.1f%s" % (n, unit)
+        n /= 1024.0
 
 
 def resets_in(iso):
@@ -316,6 +334,88 @@ class Usage(object):
     def snapshot(self):
         with self.lock:
             return self.data, self.error, self.fetched_at
+
+
+class StorageSampler(object):
+    """Samples usage of the shared cluster filesystems (the /clusterfs pools)
+    with `df`, on a background thread so a slow -- or hung -- NFS mount can never
+    freeze the dashboard. Each pool is df'd separately with its own timeout, so
+    one wedged mount shows as '(unreachable)' while the rest still report."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.rows = []          # list of {mount,total,used,avail,pct,stale}
+        self.error = "sampling..."
+        self.sampled_at = 0.0
+        self._stop = threading.Event()
+
+    def _mounts(self):
+        """Distinct mountpoints under STORAGE_PREFIXES, read from /proc/mounts so
+        the panel adapts to whatever pools this node actually has. Falls back to
+        '/' when there are no cluster mounts (e.g. running off a laptop)."""
+        seen = []
+        try:
+            with open("/proc/mounts") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) < 2:
+                        continue
+                    mp = parts[1]
+                    if mp.startswith(STORAGE_PREFIXES) and mp not in seen:
+                        seen.append(mp)
+        except Exception:
+            pass
+        return seen or ["/"]
+
+    def _df_one(self, mp):
+        """df a single mountpoint; return a row dict, or a stale row on timeout."""
+        try:
+            out = subprocess.check_output(
+                ["df", "-P", "-B1", mp],
+                stderr=subprocess.DEVNULL, timeout=STORAGE_TIMEOUT,
+            ).decode("utf-8", "replace")
+        except subprocess.TimeoutExpired:
+            return {"mount": mp, "total": 0, "used": 0, "avail": 0,
+                    "pct": 0.0, "stale": True}
+        except Exception:
+            return None
+        lines = out.splitlines()
+        if len(lines) < 2:
+            return None
+        f = lines[1].split()          # df -P keeps each fs to a single line
+        if len(f) < 6:
+            return None
+        try:
+            total, used, avail = int(f[1]), int(f[2]), int(f[3])
+        except ValueError:
+            return None
+        pct = (100.0 * used / total) if total else 0.0
+        return {"mount": mp, "total": total, "used": used, "avail": avail,
+                "pct": pct, "stale": False}
+
+    def _sample_once(self):
+        rows = [r for r in (self._df_one(mp) for mp in self._mounts()) if r]
+        rows.sort(key=lambda r: r["mount"])
+        return (rows, None) if rows else (None, "df error")
+
+    def loop(self):
+        while not self._stop.is_set():
+            rows, err = self._sample_once()
+            with self.lock:
+                if rows is not None:
+                    self.rows, self.error = rows, None   # fresh good data
+                else:
+                    self.error = err                     # keep last good rows
+                self.sampled_at = time.time()
+            if self._stop.wait(STORAGE_REFRESH):
+                return
+
+    def stop(self):
+        self._stop.set()
+
+    def snapshot(self):
+        with self.lock:
+            return list(self.rows), self.error, self.sampled_at
 
 
 # ---------------------------------------------------------------------------
@@ -1057,6 +1157,37 @@ def draw_squeue(scr, y, rows, maxrows):
     return y + 1
 
 
+def draw_storage(scr, y, storage):
+    """Draw a usage bar per shared cluster filesystem (the /clusterfs pools), so
+    you can see at a glance which one is filling up. Data comes from a background
+    df sampler (StorageSampler); an unreachable/hung pool renders '(unreachable)'
+    and never stalls the UI. Bar color follows pct_color (green/yellow/red)."""
+    rows, err, ts = storage
+    right = ("%s ago" % human_delta(time.time() - ts)) if ts else ""
+    y = section(scr, y, "  STORAGE (cluster filesystems)", right)
+    if not rows:
+        scr.addstr(y, 2, err or "no cluster filesystems", cp(C_DIM))
+        return y + 1
+    barw = max(10, min(40, scr.w - 34))
+    for r in rows:
+        if y >= scr.h - 1:            # never draw over the footer row
+            break
+        name = (os.path.basename(r["mount"]) or r["mount"])[:6]
+        scr.addstr(y, 2, name.ljust(6), cp(C_DIM))
+        if r.get("stale") or not r["total"]:
+            scr.addstr(y, 8, "(unreachable)", cp(C_YELLOW))
+            y += 1
+            continue
+        pct = r["pct"]
+        scr.addstr(y, 8, bar(pct, barw), pct_color(pct))
+        scr.addstr(y, 8 + barw + 1, "%5.1f%%" % pct, pct_color(pct) | curses.A_BOLD)
+        scr.addstr(y, 8 + barw + 8, "%s/%s  %s free" %
+                   (human_bytes(r["used"]), human_bytes(r["total"]),
+                    human_bytes(r["avail"])), cp(C_DIM))
+        y += 1
+    return y
+
+
 NODE_PROCS_COLLAPSED = 14   # top-process rows shown before the panel is expanded
 
 
@@ -1150,6 +1281,11 @@ def main(stdscr):
     usage_thread.daemon = True
     usage_thread.start()
 
+    storage = StorageSampler()
+    storage_thread = threading.Thread(target=storage.loop)
+    storage_thread.daemon = True
+    storage_thread.start()
+
     node = NodeSampler()
     node.sample_cpu()      # prime the CPU delta
     node.top_procs()       # prime the per-proc delta
@@ -1161,7 +1297,9 @@ def main(stdscr):
         ch = stdscr.getch()
         if ch in (ord("q"), ord("Q")):
             usage.stop()
+            storage.stop()
             usage_thread.join(timeout=1.0)
+            storage_thread.join(timeout=1.0)
             return
         if ch == ord("r"):
             last = 0.0
@@ -1210,6 +1348,7 @@ def main(stdscr):
 
             y = draw_jobs(scr, y, jobs, job_rows)
             y = draw_squeue(scr, y, sq, sq_rows)
+            y = draw_storage(scr, y, storage.snapshot())
 
             proc_avail = max(2, scr.h - y - 2)
             draw_node(scr, y, node, cpu_pct, host, proc_avail)

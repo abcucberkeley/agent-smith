@@ -2,7 +2,7 @@
 
 A read-only terminal dashboard for keeping an eye on your Claude Code activity
 and the compute node you're working on — all in one `curses` UI, refreshed on a
-timer. Four panels:
+timer. Five panels:
 
 1. **Usage** — your Claude usage limits (the same percentages Claude Code shows
    in settings: session / 5-hour and weekly), fetched live from the Anthropic
@@ -34,7 +34,13 @@ timer. Four panels:
 3. **SLURM** — your `squeue --me` jobs. Jobs that are actually placed get
    their own row showing the node(s) they're running on; pending jobs are
    collapsed into a single in-queue count with a per-reason breakdown.
-4. **Node** — htop-style CPU / memory / load / GPU plus the top processes for
+4. **Storage** — a usage bar per shared cluster filesystem (every `/clusterfs`
+   pool this node can see, auto-discovered from `/proc/mounts`). Each pool is
+   `df`'d on a background thread with a per-mount timeout, so a slow or hung NFS
+   mount renders `(unreachable)` instead of freezing the dashboard. Bars are
+   colored by fill (green / yellow / red) so you can spot a pool about to fill up
+   at a glance.
+5. **Node** — htop-style CPU / memory / load / GPU plus the top processes for
    whatever machine it's running on.
 
 It is **read-only**: it never modifies jobs, files, or your token. Pure Python
@@ -62,6 +68,12 @@ It is **read-only**: it never modifies jobs, files, or your token. Pure Python
   1234567     train                   RUNNING    02:14:03    node07.example
   1234571     segment                 COMPLETING 00:31:55    node07.example
   in queue: 3   (Priority 2, Resources 1)
+
+  STORAGE (cluster filesystems)                                                            12s ago
+  nvme   ##################################......  84%  258T/306T   48T free
+  nvme2  ####..................................... 10%   29T/282T  253T free
+  abc2   #######################.................. 59%  2.0P/3.4P  1.4P free
+  vast   ############............................  29%  309T/1.0P  750T free
 
   NODE: node07.example                                                                     64 cores
   CPU   ####..................................  11.0%
