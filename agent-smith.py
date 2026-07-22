@@ -88,9 +88,10 @@ PACE_GLYPH = "╎"   # dashed vertical tick: marks how far the clock is into a w
 # Tiny low-res Agent Smith caricature (slicked hair, sunglasses, suit collar),
 # tucked into the top-right when the terminal is wide enough to have room there.
 SMITH_LOGO = [
-    "▟▀▀▀▙",
-    "█▪▬▪█",
-    "▝▀█▀▘",
+    "▐█████▌",   # slicked-back hair
+    "▐▉▉▉▉▉▌",   # sunglasses
+    "▝▀███▀▘",   # jaw
+    " ╲█▬█╱ ",   # suit collar + tie
 ]
 
 # Length of each limit's rolling window, keyed by the `kind` the usage endpoint
