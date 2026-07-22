@@ -1703,10 +1703,14 @@ def main(stdscr):
         view_h = max(1, h - 2)                     # screen rows 1..h-2 show content
         if follow and cursor_key in focus_rows:    # keep the selection in view
             fr = focus_rows[cursor_key]
-            if fr < scroll_y:
-                scroll_y = fr
-            elif fr > scroll_y + view_h - 1:
-                scroll_y = fr - view_h + 1
+            # keep a few rows of context above/below the cursor (like vim's
+            # scrolloff) so following is gentle and symmetric, not a snap that
+            # pins the selection flush against the top or bottom edge.
+            margin = min(3, view_h // 3)
+            if fr < scroll_y + margin:
+                scroll_y = fr - margin
+            elif fr > scroll_y + view_h - 1 - margin:
+                scroll_y = fr - view_h + 1 + margin
         max_sy = max(0, content_h - view_h)
         max_sx = max(0, vw - w)
         scroll_y = max(0, min(scroll_y, max_sy))
