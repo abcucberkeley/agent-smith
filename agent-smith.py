@@ -2,7 +2,7 @@
 """
 Agent Smith - a read-only terminal dashboard.
 
-Five panels, refreshed on a timer:
+Six panels, refreshed on a timer:
   1. Usage      - your Claude usage limits (same numbers as the settings bar),
                   fetched live from the Anthropic usage endpoint with your own
                   OAuth token (read-only; the request only asks for your usage).
@@ -10,10 +10,13 @@ Five panels, refreshed on a timer:
                   ~/.claude/jobs/<id>/state.json
   3. SLURM      - your `squeue --me` jobs: ones placed on nodes are listed with
                   the nodes they're on; pending jobs collapse to an in-queue count
-  4. Storage    - a usage bar per shared cluster filesystem (the /clusterfs
+  4. Nodes      - every compute node's SLURM state (idle / alloc / mix / down /
+                  drain) with a category tally and who's on the busy ones, from
+                  `sinfo` + `squeue`.
+  5. Storage    - a usage bar per shared cluster filesystem (the /clusterfs
                   pools), df'd on a background thread so a hung mount can't stall
                   the UI; shows which pool is filling up.
-  5. Node       - htop-style CPU / memory / load / GPU + top processes for
+  6. Node       - htop-style CPU / memory / load / GPU + top processes for
                   whatever compute node this is running on.
 
 Pure stdlib (curses). No pip installs. Works on Python 3.6+.
@@ -562,6 +565,86 @@ def get_squeue():
     return rows
 
 
+def get_nodes():
+    """One snapshot of every compute node: state + CPU alloc/total + the users
+    running on it. Two cheap SLURM calls, each timeout-guarded; returns None on
+    failure so the panel degrades to 'unavailable' instead of crashing.
+
+      sinfo -N          -> per-node state and CPU A/I/O/T counts (one row/node)
+      squeue -t RUNNING -> node -> users, aggregated (a node can host several)
+
+    A job's nodelist may be a range (n[0024-0025].abc0); those are expanded via
+    `scontrol show hostnames` (cached, only when a '[' is actually present)."""
+    try:
+        p = subprocess.run(
+            ["sinfo", "-N", "-h", "-o", "%N\x1f%t\x1f%C"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True, timeout=6)
+    except Exception:
+        return None
+    if p.returncode != 0:
+        return None
+
+    nodes, index = [], {}
+    for line in p.stdout.splitlines():
+        parts = line.split("\x1f")
+        if len(parts) != 3:
+            continue
+        name, state, cpus = parts
+        a = t = 0
+        seg = cpus.split("/")            # Allocated/Idle/Other/Total
+        if len(seg) == 4:
+            try:
+                a, t = int(seg[0]), int(seg[3])
+            except ValueError:
+                a = t = 0
+        d = {"node": name, "state": state.strip(),
+             "cpus_alloc": a, "cpus_total": t, "users": set()}
+        nodes.append(d)
+        index[name] = d
+
+    # node -> users. Best effort: if squeue is slow/unavailable we still show
+    # states, just without the "who".
+    expand = {}   # nodelist -> [hostnames], cached within this call
+    try:
+        q = subprocess.run(
+            ["squeue", "-h", "-t", "RUNNING", "-o", "%N\x1f%u"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True, timeout=6)
+    except Exception:
+        q = None
+    if q is not None and q.returncode == 0:
+        for line in q.stdout.splitlines():
+            parts = line.split("\x1f")
+            if len(parts) != 2:
+                continue
+            nodelist, user = parts[0].strip(), parts[1].strip()
+            if not nodelist:
+                continue
+            if "[" in nodelist:
+                hosts = expand.get(nodelist)
+                if hosts is None:
+                    try:
+                        e = subprocess.run(
+                            ["scontrol", "show", "hostnames", nodelist],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            universal_newlines=True, timeout=4)
+                        hosts = e.stdout.split() if e.returncode == 0 else [nodelist]
+                    except Exception:
+                        hosts = [nodelist]
+                    expand[nodelist] = hosts
+            else:
+                hosts = [nodelist]
+            for h in hosts:
+                d = index.get(h)
+                if d is not None:
+                    d["users"].add(user)
+
+    for d in nodes:
+        d["users"] = sorted(d["users"])
+    return nodes
+
+
 # ---------------------------------------------------------------------------
 # node stats (htop-style)
 # ---------------------------------------------------------------------------
@@ -832,7 +915,7 @@ def section(scr, y, title, right=""):
 # `_click_targets` is rebuilt every frame as a list of (row, x0, x1, key) hitboxes
 # that the main loop tests a mouse click against. Keys: "jobs", "slurm", "node".
 # ---------------------------------------------------------------------------
-_expanded = {"jobs": False, "slurm": False, "node": False}
+_expanded = {"jobs": False, "slurm": False, "node": False, "nodes": False}
 _click_targets = []
 
 
@@ -1175,6 +1258,98 @@ def draw_squeue(scr, y, rows, maxrows):
     return y + 1
 
 
+# sinfo compact-state flag suffixes (* not responding, ~ powered down, - drain
+# flag, etc.) -- strip them to get the base state we color on.
+def _node_base_state(state):
+    return state.rstrip("*~#!%$@-").lower()
+
+
+# base state -> (color id, bold). idle=green (free), alloc/mix=cyan (busy+healthy),
+# down/drain=red (unusable), comp/resv=yellow (transient).
+_NODE_STATE_COLOR = {
+    "idle": (C_GREEN, False),
+    "mix": (C_CYAN, False), "mixed": (C_CYAN, False),
+    "alloc": (C_CYAN, True), "allocated": (C_CYAN, True),
+    "comp": (C_YELLOW, False), "completing": (C_YELLOW, False),
+    "resv": (C_YELLOW, False), "reserved": (C_YELLOW, False),
+    "drain": (C_RED, False), "draining": (C_RED, False), "drng": (C_RED, False),
+    "down": (C_RED, True), "downp": (C_RED, True),
+    "fail": (C_RED, True), "failing": (C_RED, True),
+    "unk": (C_DIM, False), "unknown": (C_DIM, False),
+}
+
+
+def _node_attr(state):
+    color, bold = _NODE_STATE_COLOR.get(_node_base_state(state), (C_DIM, False))
+    return cp(color) | (curses.A_BOLD if bold else 0)
+
+
+def draw_nodes(scr, y, nodes, maxrows):
+    """Draw the NODES panel: one row per compute node with its SLURM state, CPU
+    alloc/total, and (for busy nodes) who's on it. The header carries a tally on
+    the right (e.g. '7 alloc · 5 mix · 3 idle · 24 down'). Busy nodes sort to the
+    top; the list collapses to `maxrows` with a clickable 'N more' expander."""
+    title = "  NODES (sinfo)"
+    hy = y
+    if nodes is None:
+        y = section(scr, y, title)
+        scr.addstr(y, 2, "sinfo unavailable", cp(C_YELLOW))
+        return y + 1
+
+    tally = {}
+    for d in nodes:
+        b = _node_base_state(d["state"])
+        tally[b] = tally.get(b, 0) + 1
+    order = ["alloc", "mix", "idle", "comp", "resv", "drain", "down"]
+    seen, bits = set(), []
+    for k in order:
+        if tally.get(k):
+            bits.append("%d %s" % (tally[k], k)); seen.add(k)
+    for k in sorted(tally):                     # anything unusual, appended
+        if k not in seen and tally[k]:
+            bits.append("%d %s" % (tally[k], k))
+    y = section(scr, y, title, " · ".join(bits))
+
+    # busy first (has users, or alloc/mix), then idle, then down/other; name
+    # order inside each bucket -- keeps the useful rows visible while collapsed.
+    def rank(d):
+        b = _node_base_state(d["state"])
+        if d["users"] or b in ("alloc", "mix"):
+            return 0
+        if b == "idle":
+            return 1
+        return 2
+    ordered = sorted(nodes, key=lambda d: (rank(d), d["node"]))
+
+    hidden = max(0, len(ordered) - maxrows)
+    limit = len(ordered) if _expanded["nodes"] else maxrows
+    if hidden > 0 or _expanded["nodes"]:
+        draw_toggle(scr, hy, title, "nodes")
+
+    scr.addstr(y, 2, "%-14s %-9s %-9s %s" % ("node", "state", "cpu", "users"),
+               cp(C_DIM) | curses.A_UNDERLINE)
+    y += 1
+    if not ordered:
+        scr.addstr(y, 2, "no nodes reported", cp(C_DIM))
+        return y + 1
+
+    for d in ordered[:limit]:
+        if y >= scr.h - 1:                      # never draw over the footer row
+            break
+        short = d["node"].split(".")[0]         # drop the .abc0 domain for width
+        scr.addstr(y, 2, "%-14s" % short[:14], cp(C_DIM))
+        scr.addstr(y, 17, "%-9s" % d["state"][:9], _node_attr(d["state"]))
+        scr.addstr(y, 27, "%2d/%-2d" % (d["cpus_alloc"], d["cpus_total"]),
+                   cp(C_DIM))
+        if d["users"]:
+            who = ", ".join(d["users"])
+            scr.addstr(y, 37, who[:max(0, scr.w - 38)], cp(C_CYAN))
+        y += 1
+
+    y = draw_more(scr, y, "nodes", hidden)
+    return y + 1
+
+
 def draw_storage(scr, y, storage):
     """Draw a usage bar per shared cluster filesystem (the /clusterfs pools), so
     you can see at a glance which one is filling up. Data comes from a background
@@ -1375,8 +1550,9 @@ def main(stdscr):
             last = 0.0
         # 1/2/3 toggle the agents / slurm / node panels open (keyboard fallback
         # for the clickable [+]/[-]); force an immediate repaint on any toggle.
-        elif ch in (ord("1"), ord("2"), ord("3")):
-            _expanded[{"1": "jobs", "2": "slurm", "3": "node"}[chr(ch)]] ^= True
+        elif ch in (ord("1"), ord("2"), ord("3"), ord("4")):
+            _expanded[{"1": "jobs", "2": "slurm", "3": "node",
+                       "4": "nodes"}[chr(ch)]] ^= True
             last = 0.0
         # scrolling: pad content that overflows the terminal
         elif ch in (curses.KEY_DOWN, ord("j")):
@@ -1428,6 +1604,7 @@ def main(stdscr):
             cpu_pct = node.sample_cpu()
             jobs = get_jobs()
             sq = get_squeue()
+            nodes = get_nodes()
 
             y = 0
             y = draw_usage(scr, y, usage)
@@ -1435,14 +1612,16 @@ def main(stdscr):
             # cap each dynamic panel; expanded panels + scrolling handle overflow
             job_rows = max(2, min(len(jobs) or 1, 6))
             sq_rows = max(1, min(len(sq) if sq else 1, 5))
+            nodes_rows = max(3, min(len(nodes) if nodes else 1, 8))
 
             y = draw_jobs(scr, y, jobs, job_rows)
             y = draw_squeue(scr, y, sq, sq_rows)
+            y = draw_nodes(scr, y, nodes, nodes_rows)
             y = draw_storage(scr, y, storage.snapshot())
             y = draw_node(scr, y, node, cpu_pct, host, NODE_PROC_ROWS)
             content_h = max(1, y)
 
-            footer = (" q quit  r refresh  1·2·3 expand  updates %ds "
+            footer = (" q quit  r refresh  1·2·3·4 expand  updates %ds "
                       % int(REFRESH))
             if snapshot:
                 stdscr.clearok(True)   # next present() fully clears + repaints

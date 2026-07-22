@@ -2,7 +2,7 @@
 
 A read-only terminal dashboard for keeping an eye on your Claude Code activity
 and the compute node you're working on — all in one `curses` UI, refreshed on a
-timer. Five panels:
+timer. Six panels:
 
 1. **Usage** — your Claude usage limits (the same percentages Claude Code shows
    in settings: session / 5-hour and weekly), fetched live from the Anthropic
@@ -34,13 +34,18 @@ timer. Five panels:
 3. **SLURM** — your `squeue --me` jobs. Jobs that are actually placed get
    their own row showing the node(s) they're running on; pending jobs are
    collapsed into a single in-queue count with a per-reason breakdown.
-4. **Storage** — a usage bar per shared cluster filesystem (every `/clusterfs`
+4. **Nodes** — every compute node's SLURM state (idle / allocated / mixed /
+   down / drained), a category tally in the header (`7 alloc · 5 mix · 3 idle
+   · 24 down`), and — for the busy ones — who's running on them. Busy nodes
+   sort to the top; the long tail of `down` nodes collapses behind a `▾ N more`
+   expander. From `sinfo` + `squeue`, timeout-guarded.
+5. **Storage** — a usage bar per shared cluster filesystem (every `/clusterfs`
    pool this node can see, auto-discovered from `/proc/mounts`). Each pool is
    `df`'d on a background thread with a per-mount timeout, so a slow or hung NFS
    mount renders `(unreachable)` instead of freezing the dashboard. Bars are
    colored by fill (green / yellow / red) so you can spot a pool about to fill up
    at a glance.
-5. **Node** — htop-style CPU / memory / load / GPU plus the top processes for
+6. **Node** — htop-style CPU / memory / load / GPU plus the top processes for
    whatever machine it's running on.
 
 It is **read-only**: it never modifies jobs, files, or your token. Pure Python
