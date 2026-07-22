@@ -88,10 +88,15 @@ PACE_GLYPH = "╎"   # dashed vertical tick: marks how far the clock is into a w
 # Tiny low-res Agent Smith caricature (slicked hair, sunglasses, suit collar),
 # tucked into the top-right when the terminal is wide enough to have room there.
 SMITH_LOGO = [
-    "▐█████▌",   # slicked-back hair
-    "▐▉▉▉▉▉▌",   # sunglasses
-    "▝▀███▀▘",   # jaw
-    " ╲█▬█╱ ",   # suit collar + tie
+    "  ▟█████▙  ",   # slicked-back hair
+    " ██▀▀▀▀▀██ ",
+    " █▉▉▉█▉▉▉█ ",   # wraparound sunglasses (two lenses + bridge)
+    " █▔▔▔█▔▔▔█ ",
+    " ▜▖ ▀▀▀ ▗▛ ",   # stern set jaw
+    "  ▀█▄▄▄█▀  ",
+    " ▟█▀███▀█▙ ",   # suit shoulders
+    "██▘ █▬█ ▝██",   # lapels + collar
+    "▘   ▐█▌   ▝",   # hanging tie
 ]
 
 # Length of each limit's rolling window, keyed by the `kind` the usage endpoint
@@ -1526,18 +1531,6 @@ def draw_storage(scr, y, storage, share=None):
     return y
 
 
-def draw_logo(scr):
-    """Tuck the tiny Agent Smith caricature into the top-right corner, but only
-    when the terminal is wide enough that it lands in empty space rather than
-    over panel text. Matrix green, naturally."""
-    lw = max(len(s) for s in SMITH_LOGO)
-    if scr.w < 88:
-        return
-    x = scr.w - lw - 1
-    for i, line in enumerate(SMITH_LOGO):
-        scr.addstr(1 + i, x, line, cp(C_GREEN) | curses.A_BOLD)
-
-
 NODE_PROCS_COLLAPSED = 14   # top-process rows shown before the panel is expanded
 
 
@@ -1690,7 +1683,6 @@ def main(stdscr):
         y = draw_storage(scr, y, storage.snapshot(), share.snapshot())
         y = draw_node(scr, y, node, cache["cpu"], host, NODE_PROC_ROWS,
                       cache["procs"])
-        draw_logo(scr)
         content_h = max(1, y)
         rowmap = {}
         for (ty, _x0, _x1, k) in _click_targets:
@@ -1738,9 +1730,28 @@ def main(stdscr):
             stdscr.addstr(h - 1, 0, (footer + hint).ljust(w)[:w], cp(C_TITLE))
         except curses.error:
             pass
+        # Agent Smith logo: carved out of the top-right corner (over the usage
+        # bars' empty right edge) so it costs no vertical space and never covers
+        # panel text -- only when the terminal is wide/tall enough to have room.
+        lh = len(SMITH_LOGO)
+        lw = max(len(s) for s in SMITH_LOGO)
+        show_logo = (w >= lw + 80) and (h >= lh + 4)
+        lx = w - lw - 1
+        if show_logo:
+            for i, line in enumerate(SMITH_LOGO):
+                try:
+                    stdscr.addstr(1 + i, lx, line, cp(C_GREEN) | curses.A_BOLD)
+                except curses.error:
+                    pass
         stdscr.noutrefresh()
         try:
-            pad.noutrefresh(scroll_y, scroll_x, 1, 0, h - 2, max(0, w - 1))
+            if show_logo:
+                # blit L-shaped: left of the logo for its rows, full width below
+                pad.noutrefresh(scroll_y, scroll_x, 1, 0, lh, max(0, lx - 1))
+                pad.noutrefresh(scroll_y + lh, scroll_x, 1 + lh, 0, h - 2,
+                                max(0, w - 1))
+            else:
+                pad.noutrefresh(scroll_y, scroll_x, 1, 0, h - 2, max(0, w - 1))
         except curses.error:
             pass
         curses.doupdate()
