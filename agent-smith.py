@@ -88,15 +88,12 @@ PACE_GLYPH = "╎"   # dashed vertical tick: marks how far the clock is into a w
 # Tiny low-res Agent Smith caricature (slicked hair, sunglasses, suit collar),
 # tucked into the top-right when the terminal is wide enough to have room there.
 SMITH_LOGO = [
-    "  ▟█████▙  ",   # slicked-back hair
-    " ██▀▀▀▀▀██ ",
-    " █▉▉▉█▉▉▉█ ",   # wraparound sunglasses (two lenses + bridge)
-    " █▔▔▔█▔▔▔█ ",
-    " ▜▖ ▀▀▀ ▗▛ ",   # stern set jaw
-    "  ▀█▄▄▄█▀  ",
-    " ▟█▀███▀█▙ ",   # suit shoulders
-    "██▘ █▬█ ▝██",   # lapels + collar
-    "▘   ▐█▌   ▝",   # hanging tie
+    "  ▄█████▄   ",   # slicked-back hair
+    " ██▀▀▀▀▀██  ",
+    " ▐▬▬▬█▬▬▬▌  ",   # slim wraparound sunglasses (bridge in the middle)
+    "  ▝█▄▄▄█▘   ",   # stern jaw
+    "▟██████████▙",   # broad suit shoulders
+    "█▛▘ █▬█ ▝▜█ ",   # lapels + collar + tie
 ]
 
 # Length of each limit's rolling window, keyed by the `kind` the usage endpoint
@@ -1696,13 +1693,15 @@ def main(stdscr):
         if cursor_key in focus_rows:
             scr.addstr(focus_rows[cursor_key], 0, "▶", cp(C_YELLOW) | curses.A_BOLD)
 
-    def present():
+    def present(follow=False):
         """Pin title+footer on stdscr and blit the visible pad window between
-        them, auto-following the cursor and clamping to the content."""
+        them, clamping to the content. When `follow` (a cursor move just
+        happened) snap the viewport to keep the selection visible; on a raw
+        scroll (follow=False) leave scroll_y alone so it isn't yanked back."""
         nonlocal scroll_y, scroll_x
         h, w = stdscr.getmaxyx()
         view_h = max(1, h - 2)                     # screen rows 1..h-2 show content
-        if cursor_key in focus_rows:               # keep the selection in view
+        if follow and cursor_key in focus_rows:    # keep the selection in view
             fr = focus_rows[cursor_key]
             if fr < scroll_y:
                 scroll_y = fr
@@ -1757,11 +1756,16 @@ def main(stdscr):
         curses.doupdate()
 
     def cursor_move(delta):
+        """Move the selection; return True if it actually moved (False at a
+        boundary, so the caller can fall through to a raw scroll)."""
         nonlocal cursor_key
         if not focus_list:
-            return
+            return False
         i = focus_list.index(cursor_key) if cursor_key in focus_list else 0
-        cursor_key = focus_list[max(0, min(len(focus_list) - 1, i + delta))]
+        j = max(0, min(len(focus_list) - 1, i + delta))
+        moved = focus_list[j] != cursor_key
+        cursor_key = focus_list[j]
+        return moved
 
     def cursor_expand(want):
         # want: True open, False close, None toggle -- of the focused item
@@ -1803,21 +1807,30 @@ def main(stdscr):
             _expanded[{"1": "jobs", "2": "slurm", "3": "node",
                        "4": "nodes"}[chr(ch)]] ^= True
             redraw(); present()
-        # cursor navigation: up/down move the selection, right/left open/close it
+        # cursor navigation: up/down move the selection, right/left open/close it.
+        # at the top/bottom item, up/down fall through to a raw scroll so content
+        # below the last focusable item (e.g. the node process list) is reachable.
         elif ch in (curses.KEY_DOWN, ord("j")):
-            cursor_move(1); redraw(); present()
+            if cursor_move(1):
+                redraw(); present(follow=True)
+            else:
+                scroll_y += SCROLL_STEP; present()
         elif ch in (curses.KEY_UP, ord("k")):
-            cursor_move(-1); redraw(); present()
+            if cursor_move(-1):
+                redraw(); present(follow=True)
+            else:
+                scroll_y -= SCROLL_STEP; present()
         elif ch in (curses.KEY_RIGHT, ord("l")):
-            cursor_expand(True); redraw(); present()
+            cursor_expand(True); redraw(); present(follow=True)
         elif ch in (curses.KEY_LEFT, ord("h")):
-            cursor_expand(False); redraw(); present()
+            cursor_expand(False); redraw(); present(follow=True)
         elif ch in (ord(" "), curses.KEY_ENTER, 10, 13):
-            cursor_expand(None); redraw(); present()
+            cursor_expand(None); redraw(); present(follow=True)
         elif ch in (ord("g"), curses.KEY_HOME):
-            cursor_move(-1000000); scroll_y = scroll_x = 0; redraw(); present()
+            cursor_move(-1000000); scroll_y = scroll_x = 0; redraw(); present(follow=True)
         elif ch in (ord("G"), curses.KEY_END):
-            cursor_move(1000000); redraw(); present()
+            cursor_move(1000000); scroll_y = 10 ** 9      # clamped to the true bottom
+            redraw(); present()
         # raw viewport scroll for long content (e.g. the process list)
         elif ch == curses.KEY_NPAGE:
             scroll_y += max(1, stdscr.getmaxyx()[0] - 3); present()
