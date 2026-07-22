@@ -135,6 +135,11 @@ show every row; click again to collapse. Mouse clicks need a terminal with
 mouse reporting (under `tmux`, `set -g mouse on`); the number keys always
 work. The window resizes automatically.
 
+If the content is taller or wider than your terminal, it **scrolls** rather
+than getting cut off: use the arrow keys, `PageUp`/`PageDown`, or the mouse
+wheel, and `g` / `G` to jump to the top / bottom. The title and footer stay
+pinned; a `↑↓←→` indicator in the footer shows which directions have more.
+
 ## How it adapts to each user
 
 Nothing is hardcoded — run it as anyone, on any node:

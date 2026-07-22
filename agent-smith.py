@@ -18,7 +18,9 @@ Five panels, refreshed on a timer:
 
 Pure stdlib (curses). No pip installs. Works on Python 3.6+.
 
-Controls:  q quit   r force-refresh   (resizes automatically)
+Controls:  q quit   r force-refresh   1/2/3 expand panels
+           arrows / PgUp-PgDn / wheel scroll (content that overflows the
+           terminal is scrollable, not lost)   (resizes automatically)
 """
 
 import curses
@@ -53,6 +55,15 @@ USAGE_BACKOFF = 300.0    # seconds to wait after the usage endpoint rate-limits 
 STORAGE_REFRESH = 30.0   # seconds between df samples of the cluster filesystems
 STORAGE_TIMEOUT = 8.0    # per-mount df timeout so a hung NFS pool can't stall us
 STORAGE_PREFIXES = ("/clusterfs",)  # mountpoint prefixes treated as cluster storage
+
+# Scrolling: content is drawn into an off-screen pad this big, and the visible
+# window is blitted between the pinned title/footer. Anything that doesn't fit
+# on the terminal is reachable with the arrow keys / PgUp-PgDn instead of lost.
+PAD_H = 512              # scroll-buffer height (rows) -- plenty for expanded panels
+PAD_W = 512              # scroll-buffer width (cols)
+MIN_CONTENT_W = 100      # lay content out to >= this wide; scroll sideways if narrower
+NODE_PROC_ROWS = 40      # top-process rows when the node panel is expanded (14 collapsed)
+SCROLL_STEP = 2          # rows per arrow-key press
 CLK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
 PAGE_KB = (os.sysconf("SC_PAGE_SIZE") // 1024) if hasattr(os, "sysconf") else 4
 NCPU = os.cpu_count() or 1
@@ -756,11 +767,18 @@ def sev_color(sev):
 
 
 class Screen(object):
-    """Thin wrapper that clips writes so we never crash on small terminals."""
+    """Thin wrapper that clips writes so we never crash on small terminals.
 
-    def __init__(self, stdscr):
-        self.s = stdscr
-        self.h, self.w = stdscr.getmaxyx()
+    Wraps either stdscr (dims read from the terminal) or an off-screen pad
+    (dims passed explicitly, since a pad's own size is the scroll buffer, not
+    the logical content width we want panels to lay out to)."""
+
+    def __init__(self, win, h=None, w=None):
+        self.s = win
+        if h is None:
+            self.h, self.w = win.getmaxyx()
+        else:
+            self.h, self.w = h, w
 
     def addstr(self, y, x, text, attr=0):
         if y < 0 or y >= self.h or x >= self.w:
@@ -1269,7 +1287,10 @@ def main(stdscr):
     # effort: terminals without mouse support (or tmux without `mouse on`) just
     # never send events, and the 1/2/3 keys still toggle the same panels.
     try:
-        curses.mousemask(curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED)
+        mask = curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED
+        mask |= getattr(curses, "BUTTON4_PRESSED", 0)   # wheel up
+        mask |= getattr(curses, "BUTTON5_PRESSED", 0)   # wheel down
+        curses.mousemask(mask)
     except curses.error:
         pass
     # snapshot mode: force a full repaint each frame so a screen capture has no
@@ -1291,6 +1312,53 @@ def main(stdscr):
     node.top_procs()       # prime the per-proc delta
     host = socket.gethostname()
 
+    # Content is drawn into an off-screen pad; the title (row 0) and footer
+    # (last row) stay pinned on stdscr and the middle is a scrollable window
+    # onto the pad. So nothing is lost when the terminal is too small -- it's
+    # reachable with the arrow keys / PgUp-PgDn / wheel instead.
+    pad = curses.newpad(PAD_H, PAD_W)
+    scroll_y = scroll_x = 0
+    content_h = 1                 # pad rows actually used (updated each render)
+    vw = MIN_CONTENT_W            # logical content width (updated each render)
+    footer = ""
+
+    def present():
+        """Pin title+footer on stdscr and blit the visible pad window between
+        them, clamped to the current content. No data sampling -- cheap enough
+        to call on every scroll keystroke for smooth scrolling."""
+        nonlocal scroll_y, scroll_x
+        h, w = stdscr.getmaxyx()
+        view_h = max(1, h - 2)                     # screen rows 1..h-2 show content
+        max_sy = max(0, content_h - view_h)
+        max_sx = max(0, vw - w)
+        scroll_y = max(0, min(scroll_y, max_sy))
+        scroll_x = max(0, min(scroll_x, max_sx))
+        stdscr.erase()
+        clock = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        title = " Agent Smith — %s " % host
+        try:
+            stdscr.addstr(0, 0, title.ljust(w)[:w], cp(C_TITLE) | curses.A_BOLD)
+            if w > len(clock) + 1:
+                stdscr.addstr(0, w - len(clock) - 1, clock,
+                              cp(C_TITLE) | curses.A_BOLD)
+        except curses.error:
+            pass
+        arrows = ("%s%s%s%s" % ("↑" if scroll_y > 0 else " ",
+                                "↓" if scroll_y < max_sy else " ",
+                                "←" if scroll_x > 0 else " ",
+                                "→" if scroll_x < max_sx else " "))
+        foot = footer + "  " + arrows + " scroll "
+        try:
+            stdscr.addstr(h - 1, 0, foot.ljust(w)[:w], cp(C_TITLE))
+        except curses.error:
+            pass
+        stdscr.noutrefresh()
+        try:
+            pad.noutrefresh(scroll_y, scroll_x, 1, 0, h - 2, max(0, w - 1))
+        except curses.error:
+            pass
+        curses.doupdate()
+
     last = 0.0
     while True:
         # input (responsive even between refreshes)
@@ -1301,65 +1369,84 @@ def main(stdscr):
             usage_thread.join(timeout=1.0)
             storage_thread.join(timeout=1.0)
             return
-        if ch == ord("r"):
+        elif ch == ord("r"):
             last = 0.0
-        if ch == curses.KEY_RESIZE:
+        elif ch == curses.KEY_RESIZE:
             last = 0.0
         # 1/2/3 toggle the agents / slurm / node panels open (keyboard fallback
         # for the clickable [+]/[-]); force an immediate repaint on any toggle.
-        if ch in (ord("1"), ord("2"), ord("3")):
+        elif ch in (ord("1"), ord("2"), ord("3")):
             _expanded[{"1": "jobs", "2": "slurm", "3": "node"}[chr(ch)]] ^= True
             last = 0.0
-        if ch == curses.KEY_MOUSE:
+        # scrolling: pad content that overflows the terminal
+        elif ch in (curses.KEY_DOWN, ord("j")):
+            scroll_y += SCROLL_STEP; present()
+        elif ch in (curses.KEY_UP, ord("k")):
+            scroll_y -= SCROLL_STEP; present()
+        elif ch in (curses.KEY_NPAGE, ord(" ")):
+            scroll_y += max(1, stdscr.getmaxyx()[0] - 3); present()
+        elif ch == curses.KEY_PPAGE:
+            scroll_y -= max(1, stdscr.getmaxyx()[0] - 3); present()
+        elif ch in (curses.KEY_RIGHT, ord("l")):
+            scroll_x += SCROLL_STEP * 2; present()
+        elif ch in (curses.KEY_LEFT, ord("h")):
+            scroll_x -= SCROLL_STEP * 2; present()
+        elif ch in (curses.KEY_HOME, ord("g")):
+            scroll_y = scroll_x = 0; present()
+        elif ch in (curses.KEY_END, ord("G")):
+            scroll_y = content_h; present()          # clamped in present()
+        elif ch == curses.KEY_MOUSE:
             try:
                 _mid, mx, my, _mz, bstate = curses.getmouse()
             except curses.error:
                 bstate = 0
                 mx = my = -1
-            if bstate & (curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED):
-                key = hit_target(mx, my)
-                if key:
-                    _expanded[key] ^= True
-                    last = 0.0
+            wheel_up = getattr(curses, "BUTTON4_PRESSED", 0)
+            wheel_dn = getattr(curses, "BUTTON5_PRESSED", 0)
+            if wheel_up and (bstate & wheel_up):
+                scroll_y -= SCROLL_STEP; present()
+            elif wheel_dn and (bstate & wheel_dn):
+                scroll_y += SCROLL_STEP; present()
+            elif bstate & (curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED):
+                # click is in screen coords; content starts at screen row 1 and
+                # is scrolled by (scroll_y, scroll_x) -- translate to pad coords.
+                if 1 <= my <= stdscr.getmaxyx()[0] - 2:
+                    key = hit_target(mx + scroll_x, my - 1 + scroll_y)
+                    if key:
+                        _expanded[key] ^= True
+                        last = 0.0
 
         now = time.time()
         if now - last >= REFRESH:
             last = now
-            stdscr.erase()
-            scr = Screen(stdscr)
+            h, w = stdscr.getmaxyx()
+            vw = min(PAD_W, max(MIN_CONTENT_W, w))
+            pad.erase()
+            scr = Screen(pad, PAD_H, vw)
             del _click_targets[:]        # rebuilt below by the panels that draw them
-
-            clock = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            title = " Agent Smith — %s " % host
-            scr.addstr(0, 0, title.ljust(scr.w), cp(C_TITLE) | curses.A_BOLD)
-            scr.addstr(0, max(0, scr.w - len(clock) - 1), clock,
-                       cp(C_TITLE) | curses.A_BOLD)
 
             cpu_pct = node.sample_cpu()
             jobs = get_jobs()
             sq = get_squeue()
 
-            y = 2
+            y = 0
             y = draw_usage(scr, y, usage)
 
-            # cap each dynamic panel; the node panel gets whatever rows remain
+            # cap each dynamic panel; expanded panels + scrolling handle overflow
             job_rows = max(2, min(len(jobs) or 1, 6))
             sq_rows = max(1, min(len(sq) if sq else 1, 5))
 
             y = draw_jobs(scr, y, jobs, job_rows)
             y = draw_squeue(scr, y, sq, sq_rows)
             y = draw_storage(scr, y, storage.snapshot())
+            y = draw_node(scr, y, node, cpu_pct, host, NODE_PROC_ROWS)
+            content_h = max(1, y)
 
-            proc_avail = max(2, scr.h - y - 2)
-            draw_node(scr, y, node, cpu_pct, host, proc_avail)
-
-            footer = (" q quit   r refresh   1·2·3 or click [+] expand   "
-                      "*=this session   updates %ds " % int(REFRESH))
-            scr.addstr(scr.h - 1, 0, footer.ljust(scr.w),
-                       cp(C_TITLE))
+            footer = (" q quit  r refresh  1·2·3 expand  updates %ds "
+                      % int(REFRESH))
             if snapshot:
-                stdscr.clearok(True)   # next refresh fully clears + repaints
-            stdscr.refresh()
+                stdscr.clearok(True)   # next present() fully clears + repaints
+            present()
 
         time.sleep(0.1)
 
