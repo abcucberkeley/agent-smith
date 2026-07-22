@@ -287,6 +287,7 @@ class Usage(object):
         self.error = "fetching..."
         self.fetched_at = 0.0
         self._stop = threading.Event()
+        self._wake = threading.Event()   # set to force an immediate re-fetch
 
     def _read_token(self):
         with open(CRED_PATH) as f:
@@ -343,11 +344,19 @@ class Usage(object):
             # Back off harder when the usage endpoint itself rate-limits us.
             # Event.wait returns immediately once stop() is called.
             delay = USAGE_BACKOFF if (err and "rate" in err.lower()) else USAGE_REFRESH
-            if self._stop.wait(delay):
+            # sleep until the next scheduled fetch, or until refresh_now()/stop()
+            self._wake.wait(delay)
+            self._wake.clear()
+            if self._stop.is_set():
                 return
+
+    def refresh_now(self):
+        """Wake the fetch loop for an immediate refresh (bound to the 'u' key)."""
+        self._wake.set()
 
     def stop(self):
         self._stop.set()
+        self._wake.set()
 
     def snapshot(self):
         with self.lock:
@@ -434,6 +443,83 @@ class StorageSampler(object):
     def snapshot(self):
         with self.lock:
             return list(self.rows), self.error, self.sampled_at
+
+
+class MyShareSampler(object):
+    """On-demand `du` of the current user's data on each cluster filesystem.
+    Never runs on its own -- a du of a multi-TB tree can take minutes to hours --
+    it's triggered by the 'd' key. Each pool is measured on its own daemon
+    thread; the cached result is shown as a magenta overlay on that pool's usage
+    bar plus a 'you N.NT (Nh ago)' note. (No cheap per-user source exists on
+    these NFS mounts -- quota is empty -- so a real du is the only way.)"""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.data = {}    # mount -> {"bytes":int|None, "at":float, "running":bool, "err":bool}
+
+    def snapshot(self):
+        with self.lock:
+            return dict(self.data)
+
+    def measure(self, mounts):
+        """Start (or restart) a du for each mountpoint, skipping any in flight."""
+        for mp in mounts:
+            with self.lock:
+                cur = self.data.get(mp)
+                if cur and cur.get("running"):
+                    continue
+                self.data[mp] = {"bytes": (cur or {}).get("bytes"),
+                                 "at": (cur or {}).get("at"),
+                                 "running": True, "err": False}
+            th = threading.Thread(target=self._run, args=(mp,))
+            th.daemon = True
+            th.start()
+
+    def _run(self, mount):
+        dirs = self._my_dirs(mount)
+        total, ok = 0, True           # no dirs owned by me => 0 here (valid answer)
+        for d in dirs:
+            b = self._du_bytes(d)
+            if b is None:
+                ok = False            # a du errored -> keep the previous value
+            else:
+                total += b
+        with self.lock:
+            prev = self.data.get(mount, {})
+            self.data[mount] = {
+                "bytes": total if ok else prev.get("bytes"),
+                "at": time.time() if ok else prev.get("at"),
+                "running": False, "err": not ok}
+
+    def _my_dirs(self, mount):
+        """Top-level dirs on `mount` owned by me -- 'my share' of that pool by
+        path (du sums the whole subtree regardless of who owns files deeper
+        down, which is what 'how much am I taking' means)."""
+        try:
+            myuid = os.getuid()
+        except AttributeError:
+            return []
+        out = []
+        try:
+            for name in os.listdir(mount):
+                p = os.path.join(mount, name)
+                try:
+                    if os.path.isdir(p) and not os.path.islink(p) \
+                            and os.stat(p).st_uid == myuid:
+                        out.append(p)
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        return out
+
+    def _du_bytes(self, path):
+        try:
+            out = subprocess.check_output(["du", "-sb", path],
+                                          stderr=subprocess.DEVNULL)
+            return int(out.split()[0])
+        except Exception:
+            return None
 
 
 # ---------------------------------------------------------------------------
@@ -1382,11 +1468,14 @@ def draw_nodes(scr, y, nodes, maxrows):
     return y + 1
 
 
-def draw_storage(scr, y, storage):
+def draw_storage(scr, y, storage, share=None):
     """Draw a usage bar per shared cluster filesystem (the /clusterfs pools), so
     you can see at a glance which one is filling up. Data comes from a background
     df sampler (StorageSampler); an unreachable/hung pool renders '(unreachable)'
-    and never stalls the UI. Bar color follows pct_color (green/yellow/red)."""
+    and never stalls the UI. Bar color follows pct_color (green/yellow/red).
+
+    `share` (from MyShareSampler, populated on the 'd' key) overlays your own
+    footprint on each bar as a magenta segment + a 'you N.NT (age)' note."""
     rows, err, ts = storage
     right = ("%s ago" % human_delta(time.time() - ts)) if ts else ""
     y = section(scr, y, "  STORAGE (cluster filesystems)", right)
@@ -1405,10 +1494,25 @@ def draw_storage(scr, y, storage):
             continue
         pct = r["pct"]
         scr.addstr(y, 8, bar(pct, barw), pct_color(pct))
+        si = share.get(r["mount"]) if share else None
+        # overlay my share of this pool as a magenta segment over the used part
+        if si and si.get("bytes") and r["total"]:
+            mine = max(0, min(barw, int(barw * si["bytes"] / r["total"])))
+            if mine:
+                scr.addstr(y, 8, BLOCK_FULL * mine, cp(C_HEAD) | curses.A_BOLD)
         scr.addstr(y, 8 + barw + 1, "%5.1f%%" % pct, pct_color(pct) | curses.A_BOLD)
-        scr.addstr(y, 8 + barw + 8, "%s/%s  %s free" %
-                   (human_bytes(r["used"]), human_bytes(r["total"]),
-                    human_bytes(r["avail"])), cp(C_DIM))
+        info = "%s/%s  %s free" % (human_bytes(r["used"]), human_bytes(r["total"]),
+                                   human_bytes(r["avail"]))
+        if si:
+            if si.get("running"):
+                info += "  · you: measuring…"
+            elif si.get("err") and not si.get("bytes"):
+                info += "  · you: du failed"
+            elif si.get("at") is not None:
+                info += "  · you %s (%s ago)" % (
+                    human_bytes(si.get("bytes") or 0),
+                    human_delta(time.time() - si["at"]))
+        scr.addstr(y, 8 + barw + 8, info, cp(C_DIM))
         y += 1
     return y
 
@@ -1514,6 +1618,8 @@ def main(stdscr):
     storage_thread.daemon = True
     storage_thread.start()
 
+    share = MyShareSampler()   # on-demand du of my footprint per pool (the 'd' key)
+
     node = NodeSampler()
     node.sample_cpu()      # prime the CPU delta
     node.top_procs()       # prime the per-proc delta
@@ -1577,6 +1683,14 @@ def main(stdscr):
             storage_thread.join(timeout=1.0)
             return
         elif ch == ord("r"):
+            last = 0.0
+        elif ch in (ord("u"), ord("U")):
+            usage.refresh_now()          # force an immediate usage re-fetch
+            last = 0.0
+        elif ch in (ord("d"), ord("D")):
+            # kick off a du of my footprint on every pool (slow; runs in the
+            # background and overlays each bar as it finishes)
+            share.measure([r["mount"] for r in storage.snapshot()[0]])
             last = 0.0
         elif ch == curses.KEY_RESIZE:
             last = 0.0
@@ -1654,12 +1768,12 @@ def main(stdscr):
             y = draw_jobs(scr, y, jobs, job_rows)
             y = draw_squeue(scr, y, sq, sq_rows)
             y = draw_nodes(scr, y, nodes, nodes_rows)
-            y = draw_storage(scr, y, storage.snapshot())
+            y = draw_storage(scr, y, storage.snapshot(), share.snapshot())
             y = draw_node(scr, y, node, cpu_pct, host, NODE_PROC_ROWS)
             content_h = max(1, y)
 
-            footer = (" q quit  r refresh  1·2·3·4 expand  updates %ds "
-                      % int(REFRESH))
+            footer = (" q quit  r refresh  u usage  d my-du  1·2·3·4 expand "
+                      " updates %ds " % int(REFRESH))
             if snapshot:
                 stdscr.clearok(True)   # next present() fully clears + repaints
             present()

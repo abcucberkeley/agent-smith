@@ -137,10 +137,17 @@ tmux new -s smith 'python3 agent-smith.py'
 ```
 
 **Controls:** `q` quit, `r` force a refresh. Click a panel's `[+]` / `▾ N more`
-(or press `1`/`2`/`3` for the Agents / SLURM / Node panels) to expand it and
-show every row; click again to collapse. Mouse clicks need a terminal with
-mouse reporting (under `tmux`, `set -g mouse on`); the number keys always
-work. The window resizes automatically.
+(or press `1`/`2`/`3`/`4` for the Agents / SLURM / Nodes / Node panels) to expand
+it and show every row; click again to collapse. In the Nodes panel you can also
+click an individual busy node to drill it open into its per-user core breakdown.
+Mouse clicks need a terminal with mouse reporting (under `tmux`,
+`set -g mouse on`); the number keys always work. The window resizes automatically.
+
+Two on-demand keys avoid expensive work until you ask for it: **`u`** forces an
+immediate Usage re-fetch (instead of waiting for the 2-minute timer), and **`d`**
+kicks off a `du` of your own footprint on every cluster pool — this is slow (a
+multi-TB tree can take a while), so it runs in the background and paints a
+magenta overlay + a `you N.NT (age)` note onto each Storage bar as each finishes.
 
 If the content is taller or wider than your terminal, it **scrolls** rather
 than getting cut off: use the arrow keys, `PageUp`/`PageDown`, or the mouse
