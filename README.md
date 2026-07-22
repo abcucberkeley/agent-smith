@@ -91,7 +91,7 @@ It is **read-only**: it never modifies jobs, files, or your token. Pure Python
   204815  alice         98.4     1240M  python
   204902  bob           42.1      512M  matlab
   ...
- q quit   r refresh   1·2·3 or click [+] expand   *=this session   updates 2s
+ ▶ q quit  r refresh  u usage  d du  ↑↓ select  ←→ open/close  updates 2s
 ```
 
 (Bars render as solid Unicode blocks in a real terminal; shown here as `#`/`.`
@@ -99,7 +99,8 @@ so the example is plain ASCII. The pace marker is an orange dashed tick (`╎`),
 shown here as `|`. Status colors: green `done`, yellow `running`,
 red `needs-prompt`, cyan `idle`. The `[+]` after a panel title (and the
 `▾ N more` line) expands that panel to show every row — click it, or press
-`1`/`2`/`3` for Agents/SLURM/Node; `[-]` / `▴` collapses it again. All
+`1`/`2`/`3`/`4` for Agents/SLURM/Nodes/Node, or use the `▶` cursor (↑↓ to
+select, →← to open/close); `[-]` / `▴` collapses. All
 names/users/values above are fictional.)
 
 ## Requirements
@@ -136,23 +137,23 @@ tmux new -s smith 'python3 agent-smith.py'
 # detach: Ctrl-b d   reattach: tmux attach -t smith
 ```
 
-**Controls:** `q` quit, `r` force a refresh. Click a panel's `[+]` / `▾ N more`
-(or press `1`/`2`/`3`/`4` for the Agents / SLURM / Nodes / Node panels) to expand
-it and show every row; click again to collapse. In the Nodes panel you can also
-click an individual busy node to drill it open into its per-user core breakdown.
-Mouse clicks need a terminal with mouse reporting (under `tmux`,
-`set -g mouse on`); the number keys always work. The window resizes automatically.
+**Controls:** a selection cursor (`▶`) on the left marks the current expandable
+item. **↑ / ↓** move it between the panels (and individual busy nodes); **→**
+opens the selected item, **←** closes it, and `Space` toggles. `g` / `G` jump the
+cursor to the top / bottom, and the viewport **auto-follows** it so nothing you
+select is ever off-screen. For long content (like the process list) `PageUp` /
+`PageDown` and the mouse wheel raw-scroll, and `<` / `>` scroll sideways when a
+row is wider than the terminal — so nothing is ever cut off and lost. You can
+still **click** any `[+]` / `▾ N more` / node row directly, or press
+`1`/`2`/`3`/`4` to toggle the Agents / SLURM / Nodes / Node panels. Mouse needs a
+terminal with reporting on (under `tmux`, `set -g mouse on`); the keys always
+work. `q` quits, `r` forces a full refresh, and the window resizes automatically.
 
-Two on-demand keys avoid expensive work until you ask for it: **`u`** forces an
-immediate Usage re-fetch (instead of waiting for the 2-minute timer), and **`d`**
-kicks off a `du` of your own footprint on every cluster pool — this is slow (a
-multi-TB tree can take a while), so it runs in the background and paints a
-magenta overlay + a `you N.NT (age)` note onto each Storage bar as each finishes.
-
-If the content is taller or wider than your terminal, it **scrolls** rather
-than getting cut off: use the arrow keys, `PageUp`/`PageDown`, or the mouse
-wheel, and `g` / `G` to jump to the top / bottom. The title and footer stay
-pinned; a `↑↓←→` indicator in the footer shows which directions have more.
+Two on-demand keys avoid expensive work until you ask: **`u`** forces an immediate
+Usage re-fetch (instead of waiting out the 2-minute timer), and **`d`** kicks off
+a `du` of your own footprint on every cluster pool — slow (a multi-TB tree takes a
+while), so it runs in the background and paints a magenta overlay + a
+`you N.NT (age)` note onto each Storage bar as each finishes.
 
 ## How it adapts to each user
 

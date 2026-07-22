@@ -85,6 +85,14 @@ BLOCK_FULL = "█"   # full block
 BLOCK_LIGHT = "░"  # light shade
 PACE_GLYPH = "╎"   # dashed vertical tick: marks how far the clock is into a window
 
+# Tiny low-res Agent Smith caricature (slicked hair, sunglasses, suit collar),
+# tucked into the top-right when the terminal is wide enough to have room there.
+SMITH_LOGO = [
+    "▟▀▀▀▙",
+    "█▪▬▪█",
+    "▝▀█▀▘",
+]
+
 # Length of each limit's rolling window, keyed by the `kind` the usage endpoint
 # reports. Used to place the "pace" marker on a bar -- i.e. what fraction of the
 # window's time has elapsed. A fill that runs ahead of this marker means you're
@@ -1517,15 +1525,31 @@ def draw_storage(scr, y, storage, share=None):
     return y
 
 
+def draw_logo(scr):
+    """Tuck the tiny Agent Smith caricature into the top-right corner, but only
+    when the terminal is wide enough that it lands in empty space rather than
+    over panel text. Matrix green, naturally."""
+    lw = max(len(s) for s in SMITH_LOGO)
+    if scr.w < 88:
+        return
+    x = scr.w - lw - 1
+    for i, line in enumerate(SMITH_LOGO):
+        scr.addstr(1 + i, x, line, cp(C_GREEN) | curses.A_BOLD)
+
+
 NODE_PROCS_COLLAPSED = 14   # top-process rows shown before the panel is expanded
 
 
-def draw_node(scr, y, node, cpu_pct, host, proc_avail):
+def draw_node(scr, y, node, cpu_pct, host, proc_avail, procs=None):
     """Draw the node CPU/MEM/load/GPU bars and the top-process table.
 
     `proc_avail` is how many process rows fit between here and the footer. While
     collapsed we cap the list at NODE_PROCS_COLLAPSED; expanded, we fill the space
-    (a [+] appears on the header only when there's actually more room to fill)."""
+    (a [+] appears on the header only when there's actually more room to fill).
+
+    `procs` is an optional pre-sampled top_procs() list -- passed in so a redraw
+    (on a keystroke) reuses the cached sample instead of re-reading /proc and
+    resetting the CPU-delta baseline. When None we sample directly."""
     title = "  NODE: %s" % host
     hy = y
     y = section(scr, y, title, "%d cores" % NCPU)
@@ -1575,7 +1599,8 @@ def draw_node(scr, y, node, cpu_pct, host, proc_avail):
                ("pid", "user", "cpu%", "mem", "command"),
                cp(C_DIM) | curses.A_UNDERLINE)
     y += 1
-    for p in node.top_procs(nprocs):
+    plist = node.top_procs(nprocs) if procs is None else procs[:nprocs]
+    for p in plist:
         if y >= scr.h - 1:        # never draw over the footer row
             break
         scr.addstr(y, 2, "%-7s %-10s %6.1f %8.0fM  %s" %
@@ -1625,23 +1650,71 @@ def main(stdscr):
     node.top_procs()       # prime the per-proc delta
     host = socket.gethostname()
 
-    # Content is drawn into an off-screen pad; the title (row 0) and footer
-    # (last row) stay pinned on stdscr and the middle is a scrollable window
-    # onto the pad. So nothing is lost when the terminal is too small -- it's
-    # reachable with the arrow keys / PgUp-PgDn / wheel instead.
+    # Panels are drawn into an off-screen pad from cached samples; the title
+    # (row 0) and footer (last row) stay pinned on stdscr and the middle is a
+    # scrollable viewport. A selection cursor (▶, drawn at the left) moves
+    # between the expandable items: up/down move it, right/left open/close it,
+    # and the viewport auto-follows. PgUp/PgDn + wheel raw-scroll long content
+    # (e.g. the process list). Redraw works off the cache, so moving the cursor
+    # never re-runs sinfo/df/du -- only the 2s tick re-samples.
     pad = curses.newpad(PAD_H, PAD_W)
     scroll_y = scroll_x = 0
-    content_h = 1                 # pad rows actually used (updated each render)
-    vw = MIN_CONTENT_W            # logical content width (updated each render)
+    content_h = 1                # pad rows used (set each redraw)
+    vw = MIN_CONTENT_W           # logical content width (set each redraw)
     footer = ""
+    cursor_key = None            # the focused expandable item
+    focus_list = []              # focusable toggle keys, top-to-bottom
+    focus_rows = {}              # key -> pad row
+    cache = {"cpu": 0.0, "jobs": [], "sq": None, "nodes": None, "procs": []}
+
+    def redraw():
+        """Draw every panel into the pad from the cached samples, rebuild the
+        list of focusable items, and stamp the selection cursor. No sampling
+        (sinfo/df/du/proc) here, so it's cheap to call on every keystroke."""
+        nonlocal content_h, vw, cursor_key
+        w = stdscr.getmaxyx()[1]
+        vw = min(PAD_W, max(MIN_CONTENT_W, w))
+        pad.erase()
+        scr = Screen(pad, PAD_H, vw)
+        del _click_targets[:]
+        jobs, sq, nodes = cache["jobs"], cache["sq"], cache["nodes"]
+        job_rows = max(2, min(len(jobs) or 1, 6))
+        sq_rows = max(1, min(len(sq) if sq else 1, 5))
+        nodes_rows = max(3, min(len(nodes) if nodes else 1, 8))
+        y = 0
+        y = draw_usage(scr, y, usage)
+        y = draw_jobs(scr, y, jobs, job_rows)
+        y = draw_squeue(scr, y, sq, sq_rows)
+        y = draw_nodes(scr, y, nodes, nodes_rows)
+        y = draw_storage(scr, y, storage.snapshot(), share.snapshot())
+        y = draw_node(scr, y, node, cache["cpu"], host, NODE_PROC_ROWS,
+                      cache["procs"])
+        draw_logo(scr)
+        content_h = max(1, y)
+        rowmap = {}
+        for (ty, _x0, _x1, k) in _click_targets:
+            if k not in rowmap or ty < rowmap[k]:
+                rowmap[k] = ty
+        focus_list[:] = sorted(rowmap, key=lambda k: rowmap[k])
+        focus_rows.clear()
+        focus_rows.update(rowmap)
+        if cursor_key not in focus_rows:
+            cursor_key = focus_list[0] if focus_list else None
+        if cursor_key in focus_rows:
+            scr.addstr(focus_rows[cursor_key], 0, "▶", cp(C_YELLOW) | curses.A_BOLD)
 
     def present():
         """Pin title+footer on stdscr and blit the visible pad window between
-        them, clamped to the current content. No data sampling -- cheap enough
-        to call on every scroll keystroke for smooth scrolling."""
+        them, auto-following the cursor and clamping to the content."""
         nonlocal scroll_y, scroll_x
         h, w = stdscr.getmaxyx()
         view_h = max(1, h - 2)                     # screen rows 1..h-2 show content
+        if cursor_key in focus_rows:               # keep the selection in view
+            fr = focus_rows[cursor_key]
+            if fr < scroll_y:
+                scroll_y = fr
+            elif fr > scroll_y + view_h - 1:
+                scroll_y = fr - view_h + 1
         max_sy = max(0, content_h - view_h)
         max_sx = max(0, vw - w)
         scroll_y = max(0, min(scroll_y, max_sy))
@@ -1656,13 +1729,12 @@ def main(stdscr):
                               cp(C_TITLE) | curses.A_BOLD)
         except curses.error:
             pass
-        arrows = ("%s%s%s%s" % ("↑" if scroll_y > 0 else " ",
-                                "↓" if scroll_y < max_sy else " ",
-                                "←" if scroll_x > 0 else " ",
-                                "→" if scroll_x < max_sx else " "))
-        foot = footer + "  " + arrows + " scroll "
+        hint = ""
+        if scroll_y > 0 or scroll_y < max_sy:
+            hint = "  %s%s more" % ("↑" if scroll_y > 0 else "",
+                                    "↓" if scroll_y < max_sy else "")
         try:
-            stdscr.addstr(h - 1, 0, foot.ljust(w)[:w], cp(C_TITLE))
+            stdscr.addstr(h - 1, 0, (footer + hint).ljust(w)[:w], cp(C_TITLE))
         except curses.error:
             pass
         stdscr.noutrefresh()
@@ -1671,6 +1743,28 @@ def main(stdscr):
         except curses.error:
             pass
         curses.doupdate()
+
+    def cursor_move(delta):
+        nonlocal cursor_key
+        if not focus_list:
+            return
+        i = focus_list.index(cursor_key) if cursor_key in focus_list else 0
+        cursor_key = focus_list[max(0, min(len(focus_list) - 1, i + delta))]
+
+    def cursor_expand(want):
+        # want: True open, False close, None toggle -- of the focused item
+        if cursor_key is None:
+            return
+        if cursor_key.startswith("node:"):
+            n = cursor_key[5:]
+            new = (n not in _expanded_node_rows) if want is None else want
+            if new:
+                _expanded_node_rows.add(n)
+            else:
+                _expanded_node_rows.discard(n)
+        else:
+            cur = _expanded.get(cursor_key, False)
+            _expanded[cursor_key] = (not cur) if want is None else want
 
     last = 0.0
     while True:
@@ -1683,40 +1777,44 @@ def main(stdscr):
             storage_thread.join(timeout=1.0)
             return
         elif ch == ord("r"):
-            last = 0.0
+            last = 0.0                               # force a full re-sample
         elif ch in (ord("u"), ord("U")):
-            usage.refresh_now()          # force an immediate usage re-fetch
-            last = 0.0
+            usage.refresh_now(); redraw(); present()
         elif ch in (ord("d"), ord("D")):
-            # kick off a du of my footprint on every pool (slow; runs in the
-            # background and overlays each bar as it finishes)
+            # du of my footprint on every pool (slow; runs in the background and
+            # overlays each bar as it finishes)
             share.measure([r["mount"] for r in storage.snapshot()[0]])
-            last = 0.0
+            redraw(); present()
         elif ch == curses.KEY_RESIZE:
             last = 0.0
-        # 1/2/3 toggle the agents / slurm / node panels open (keyboard fallback
-        # for the clickable [+]/[-]); force an immediate repaint on any toggle.
         elif ch in (ord("1"), ord("2"), ord("3"), ord("4")):
             _expanded[{"1": "jobs", "2": "slurm", "3": "node",
                        "4": "nodes"}[chr(ch)]] ^= True
-            last = 0.0
-        # scrolling: pad content that overflows the terminal
+            redraw(); present()
+        # cursor navigation: up/down move the selection, right/left open/close it
         elif ch in (curses.KEY_DOWN, ord("j")):
-            scroll_y += SCROLL_STEP; present()
+            cursor_move(1); redraw(); present()
         elif ch in (curses.KEY_UP, ord("k")):
-            scroll_y -= SCROLL_STEP; present()
-        elif ch in (curses.KEY_NPAGE, ord(" ")):
+            cursor_move(-1); redraw(); present()
+        elif ch in (curses.KEY_RIGHT, ord("l")):
+            cursor_expand(True); redraw(); present()
+        elif ch in (curses.KEY_LEFT, ord("h")):
+            cursor_expand(False); redraw(); present()
+        elif ch in (ord(" "), curses.KEY_ENTER, 10, 13):
+            cursor_expand(None); redraw(); present()
+        elif ch in (ord("g"), curses.KEY_HOME):
+            cursor_move(-1000000); scroll_y = scroll_x = 0; redraw(); present()
+        elif ch in (ord("G"), curses.KEY_END):
+            cursor_move(1000000); redraw(); present()
+        # raw viewport scroll for long content (e.g. the process list)
+        elif ch == curses.KEY_NPAGE:
             scroll_y += max(1, stdscr.getmaxyx()[0] - 3); present()
         elif ch == curses.KEY_PPAGE:
             scroll_y -= max(1, stdscr.getmaxyx()[0] - 3); present()
-        elif ch in (curses.KEY_RIGHT, ord("l")):
-            scroll_x += SCROLL_STEP * 2; present()
-        elif ch in (curses.KEY_LEFT, ord("h")):
-            scroll_x -= SCROLL_STEP * 2; present()
-        elif ch in (curses.KEY_HOME, ord("g")):
-            scroll_y = scroll_x = 0; present()
-        elif ch in (curses.KEY_END, ord("G")):
-            scroll_y = content_h; present()          # clamped in present()
+        elif ch in (ord("<"), ord(",")):
+            scroll_x -= SCROLL_STEP * 3; present()
+        elif ch in (ord(">"), ord(".")):
+            scroll_x += SCROLL_STEP * 3; present()
         elif ch == curses.KEY_MOUSE:
             try:
                 _mid, mx, my, _mz, bstate = curses.getmouse()
@@ -1730,53 +1828,28 @@ def main(stdscr):
             elif wheel_dn and (bstate & wheel_dn):
                 scroll_y += SCROLL_STEP; present()
             elif bstate & (curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED):
-                # click is in screen coords; content starts at screen row 1 and
-                # is scrolled by (scroll_y, scroll_x) -- translate to pad coords.
+                # screen coords -> pad coords (content starts at screen row 1)
                 if 1 <= my <= stdscr.getmaxyx()[0] - 2:
                     key = hit_target(mx + scroll_x, my - 1 + scroll_y)
-                    if key and key.startswith("node:"):
-                        n = key[5:]
-                        _expanded_node_rows.discard(n) if n in _expanded_node_rows \
-                            else _expanded_node_rows.add(n)
-                        last = 0.0
-                    elif key:
-                        _expanded[key] ^= True
-                        last = 0.0
+                    if key:
+                        cursor_key = key          # move selection to the click
+                        cursor_expand(None)       # and toggle it
+                        redraw(); present()
 
         now = time.time()
         if now - last >= REFRESH:
             last = now
-            h, w = stdscr.getmaxyx()
-            vw = min(PAD_W, max(MIN_CONTENT_W, w))
-            pad.erase()
-            scr = Screen(pad, PAD_H, vw)
-            del _click_targets[:]        # rebuilt below by the panels that draw them
-
-            cpu_pct = node.sample_cpu()
-            jobs = get_jobs()
-            sq = get_squeue()
-            nodes = get_nodes()
-
-            y = 0
-            y = draw_usage(scr, y, usage)
-
-            # cap each dynamic panel; expanded panels + scrolling handle overflow
-            job_rows = max(2, min(len(jobs) or 1, 6))
-            sq_rows = max(1, min(len(sq) if sq else 1, 5))
-            nodes_rows = max(3, min(len(nodes) if nodes else 1, 8))
-
-            y = draw_jobs(scr, y, jobs, job_rows)
-            y = draw_squeue(scr, y, sq, sq_rows)
-            y = draw_nodes(scr, y, nodes, nodes_rows)
-            y = draw_storage(scr, y, storage.snapshot(), share.snapshot())
-            y = draw_node(scr, y, node, cpu_pct, host, NODE_PROC_ROWS)
-            content_h = max(1, y)
-
-            footer = (" q quit  r refresh  u usage  d my-du  1·2·3·4 expand "
-                      " updates %ds " % int(REFRESH))
+            # the only place that runs the (slow) samplers; redraw() reuses these
+            cache["cpu"] = node.sample_cpu()
+            cache["jobs"] = get_jobs()
+            cache["sq"] = get_squeue()
+            cache["nodes"] = get_nodes()
+            cache["procs"] = node.top_procs(NODE_PROC_ROWS)
+            footer = (" q quit  r refresh  u usage  d du  ↑↓ select  ←→ open/close"
+                      "  updates %ds " % int(REFRESH))
             if snapshot:
                 stdscr.clearok(True)   # next present() fully clears + repaints
-            present()
+            redraw(); present()
 
         time.sleep(0.1)
 
