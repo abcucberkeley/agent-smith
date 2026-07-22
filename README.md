@@ -137,17 +137,17 @@ tmux new -s smith 'python3 agent-smith.py'
 # detach: Ctrl-b d   reattach: tmux attach -t smith
 ```
 
-**Controls:** a selection cursor (`▶`) on the left marks the current expandable
-item. **↑ / ↓** move it between the panels (and individual busy nodes); **→**
-opens the selected item, **←** closes it, and `Space` toggles. `g` / `G` jump the
-cursor to the top / bottom, and the viewport **auto-follows** it so nothing you
-select is ever off-screen. For long content (like the process list) `PageUp` /
-`PageDown` and the mouse wheel raw-scroll, and `<` / `>` scroll sideways when a
-row is wider than the terminal — so nothing is ever cut off and lost. You can
-still **click** any `[+]` / `▾ N more` / node row directly, or press
-`1`/`2`/`3`/`4` to toggle the Agents / SLURM / Nodes / Node panels. Mouse needs a
-terminal with reporting on (under `tmux`, `set -g mouse on`); the keys always
-work. `q` quits, `r` forces a full refresh, and the window resizes automatically.
+**Controls:** a selection cursor (`▶`) on the left moves **freely over every
+row** — **↑ / ↓** move it one row at a time and the viewport auto-follows, so all
+content (down to the last process row) is reachable. **→** opens whatever
+expandable item the cursor's row is on, **←** closes it, `Space` toggles; `g` /
+`G` jump to the top / bottom. For fast paging, `PageUp` / `PageDown` and the mouse
+wheel raw-scroll, and `<` / `>` scroll sideways when a row is wider than the
+terminal — nothing is ever cut off and lost. You can still **click** any `[+]` /
+`▾ N more` / node row directly, or press `1`/`2`/`3`/`4` to toggle the Agents /
+SLURM / Nodes / Node panels. Mouse needs a terminal with reporting on (under
+`tmux`, `set -g mouse on`); the keys always work. `q` quits, `r` forces a full
+refresh, and the window resizes automatically.
 
 Two on-demand keys avoid expensive work until you ask: **`u`** forces an immediate
 Usage re-fetch (instead of waiting out the 2-minute timer), and **`d`** kicks off

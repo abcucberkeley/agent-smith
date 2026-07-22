@@ -85,17 +85,6 @@ BLOCK_FULL = "█"   # full block
 BLOCK_LIGHT = "░"  # light shade
 PACE_GLYPH = "╎"   # dashed vertical tick: marks how far the clock is into a window
 
-# Tiny low-res Agent Smith caricature (slicked hair, sunglasses, suit collar),
-# tucked into the top-right when the terminal is wide enough to have room there.
-SMITH_LOGO = [
-    "  ▄██████▄  ",   # slicked-back hair (▐ = side part)
-    "  ██▐█████  ",
-    "  ▒▒▒▒▒▒▒▒  ",   # forehead
-    "  ███  ███  ",   # slim twin-lens sunglasses (nose-bridge gap)
-    " ▄██▙▐▌▟██▄ ",   # collar-V + tie
-    "████▌▐▌▐████",   # broad suit shoulders, tie down the middle
-]
-
 # Length of each limit's rolling window, keyed by the `kind` the usage endpoint
 # reports. Used to place the "pace" marker on a bar -- i.e. what fraction of the
 # window's time has elapsed. A fill that runs ahead of this marker means you're
@@ -1644,25 +1633,23 @@ def main(stdscr):
     # Panels are drawn into an off-screen pad from cached samples; the title
     # (row 0) and footer (last row) stay pinned on stdscr and the middle is a
     # scrollable viewport. A selection cursor (▶, drawn at the left) moves
-    # between the expandable items: up/down move it, right/left open/close it,
-    # and the viewport auto-follows. PgUp/PgDn + wheel raw-scroll long content
-    # (e.g. the process list). Redraw works off the cache, so moving the cursor
-    # never re-runs sinfo/df/du -- only the 2s tick re-samples.
+    # freely over every row: up/down move it one row at a time (the viewport
+    # auto-follows), right/left open/close whatever expandable item its row is
+    # on. PgUp/PgDn + wheel raw-scroll. Redraw works off the cache, so moving
+    # the cursor never re-runs sinfo/df/du -- only the 2s tick re-samples.
     pad = curses.newpad(PAD_H, PAD_W)
     scroll_y = scroll_x = 0
     content_h = 1                # pad rows used (set each redraw)
     vw = MIN_CONTENT_W           # logical content width (set each redraw)
     footer = ""
-    cursor_key = None            # the focused expandable item
-    focus_list = []              # focusable toggle keys, top-to-bottom
-    focus_rows = {}              # key -> pad row
+    cursor_row = 0               # selection row -- moves freely over every row
     cache = {"cpu": 0.0, "jobs": [], "sq": None, "nodes": None, "procs": []}
 
     def redraw():
-        """Draw every panel into the pad from the cached samples, rebuild the
-        list of focusable items, and stamp the selection cursor. No sampling
-        (sinfo/df/du/proc) here, so it's cheap to call on every keystroke."""
-        nonlocal content_h, vw, cursor_key
+        """Draw every panel into the pad from the cached samples and stamp the
+        selection cursor at its row. No sampling (sinfo/df/du/proc) here, so
+        it's cheap to call on every keystroke."""
+        nonlocal content_h, vw, cursor_row
         w = stdscr.getmaxyx()[1]
         vw = min(PAD_W, max(MIN_CONTENT_W, w))
         pad.erase()
@@ -1681,36 +1668,22 @@ def main(stdscr):
         y = draw_node(scr, y, node, cache["cpu"], host, NODE_PROC_ROWS,
                       cache["procs"])
         content_h = max(1, y)
-        rowmap = {}
-        for (ty, _x0, _x1, k) in _click_targets:
-            if k not in rowmap or ty < rowmap[k]:
-                rowmap[k] = ty
-        focus_list[:] = sorted(rowmap, key=lambda k: rowmap[k])
-        focus_rows.clear()
-        focus_rows.update(rowmap)
-        if cursor_key not in focus_rows:
-            cursor_key = focus_list[0] if focus_list else None
-        if cursor_key in focus_rows:
-            scr.addstr(focus_rows[cursor_key], 0, "▶", cp(C_YELLOW) | curses.A_BOLD)
+        cursor_row = max(0, min(cursor_row, content_h - 1))
+        scr.addstr(cursor_row, 0, "▶", cp(C_YELLOW) | curses.A_BOLD)
 
     def present(follow=False):
         """Pin title+footer on stdscr and blit the visible pad window between
-        them, clamping to the content. When `follow` (a cursor move just
-        happened) snap the viewport to keep the selection visible; on a raw
-        scroll (follow=False) leave scroll_y alone so it isn't yanked back."""
+        them, clamping to the content. When `follow`, keep the cursor row in
+        view (with a scrolloff margin); on a raw scroll leave scroll_y alone."""
         nonlocal scroll_y, scroll_x
         h, w = stdscr.getmaxyx()
         view_h = max(1, h - 2)                     # screen rows 1..h-2 show content
-        if follow and cursor_key in focus_rows:    # keep the selection in view
-            fr = focus_rows[cursor_key]
-            # keep a few rows of context above/below the cursor (like vim's
-            # scrolloff) so following is gentle and symmetric, not a snap that
-            # pins the selection flush against the top or bottom edge.
-            margin = min(3, view_h // 3)
-            if fr < scroll_y + margin:
-                scroll_y = fr - margin
-            elif fr > scroll_y + view_h - 1 - margin:
-                scroll_y = fr - view_h + 1 + margin
+        if follow:                                 # keep the cursor row in view
+            margin = min(3, view_h // 3)           # scrolloff, so it isn't flush
+            if cursor_row < scroll_y + margin:
+                scroll_y = cursor_row - margin
+            elif cursor_row > scroll_y + view_h - 1 - margin:
+                scroll_y = cursor_row - view_h + 1 + margin
         max_sy = max(0, content_h - view_h)
         max_sx = max(0, vw - w)
         scroll_y = max(0, min(scroll_y, max_sy))
@@ -1733,58 +1706,36 @@ def main(stdscr):
             stdscr.addstr(h - 1, 0, (footer + hint).ljust(w)[:w], cp(C_TITLE))
         except curses.error:
             pass
-        # Agent Smith logo: carved out of the top-right corner (over the usage
-        # bars' empty right edge) so it costs no vertical space and never covers
-        # panel text -- only when the terminal is wide/tall enough to have room.
-        lh = len(SMITH_LOGO)
-        lw = max(len(s) for s in SMITH_LOGO)
-        show_logo = (w >= lw + 80) and (h >= lh + 4)
-        lx = w - lw - 1
-        if show_logo:
-            for i, line in enumerate(SMITH_LOGO):
-                try:
-                    stdscr.addstr(1 + i, lx, line, cp(C_GREEN) | curses.A_BOLD)
-                except curses.error:
-                    pass
         stdscr.noutrefresh()
         try:
-            if show_logo:
-                # blit L-shaped: left of the logo for its rows, full width below
-                pad.noutrefresh(scroll_y, scroll_x, 1, 0, lh, max(0, lx - 1))
-                pad.noutrefresh(scroll_y + lh, scroll_x, 1 + lh, 0, h - 2,
-                                max(0, w - 1))
-            else:
-                pad.noutrefresh(scroll_y, scroll_x, 1, 0, h - 2, max(0, w - 1))
+            pad.noutrefresh(scroll_y, scroll_x, 1, 0, h - 2, max(0, w - 1))
         except curses.error:
             pass
         curses.doupdate()
 
     def cursor_move(delta):
-        """Move the selection; return True if it actually moved (False at a
-        boundary, so the caller can fall through to a raw scroll)."""
-        nonlocal cursor_key
-        if not focus_list:
-            return False
-        i = focus_list.index(cursor_key) if cursor_key in focus_list else 0
-        j = max(0, min(len(focus_list) - 1, i + delta))
-        moved = focus_list[j] != cursor_key
-        cursor_key = focus_list[j]
-        return moved
+        nonlocal cursor_row
+        cursor_row = max(0, min(content_h - 1, cursor_row + delta))
 
     def cursor_expand(want):
-        # want: True open, False close, None toggle -- of the focused item
-        if cursor_key is None:
+        # toggle the expandable item (if any) whose row the cursor is on
+        key = None
+        for (ty, _x0, _x1, k) in _click_targets:
+            if ty == cursor_row:
+                key = k
+                break
+        if key is None:
             return
-        if cursor_key.startswith("node:"):
-            n = cursor_key[5:]
+        if key.startswith("node:"):
+            n = key[5:]
             new = (n not in _expanded_node_rows) if want is None else want
             if new:
                 _expanded_node_rows.add(n)
             else:
                 _expanded_node_rows.discard(n)
         else:
-            cur = _expanded.get(cursor_key, False)
-            _expanded[cursor_key] = (not cur) if want is None else want
+            cur = _expanded.get(key, False)
+            _expanded[key] = (not cur) if want is None else want
 
     last = 0.0
     while True:
@@ -1815,15 +1766,9 @@ def main(stdscr):
         # at the top/bottom item, up/down fall through to a raw scroll so content
         # below the last focusable item (e.g. the node process list) is reachable.
         elif ch in (curses.KEY_DOWN, ord("j")):
-            if cursor_move(1):
-                redraw(); present(follow=True)
-            else:
-                scroll_y += SCROLL_STEP; present()
+            cursor_move(1); redraw(); present(follow=True)
         elif ch in (curses.KEY_UP, ord("k")):
-            if cursor_move(-1):
-                redraw(); present(follow=True)
-            else:
-                scroll_y -= SCROLL_STEP; present()
+            cursor_move(-1); redraw(); present(follow=True)
         elif ch in (curses.KEY_RIGHT, ord("l")):
             cursor_expand(True); redraw(); present(follow=True)
         elif ch in (curses.KEY_LEFT, ord("h")):
@@ -1831,10 +1776,9 @@ def main(stdscr):
         elif ch in (ord(" "), curses.KEY_ENTER, 10, 13):
             cursor_expand(None); redraw(); present(follow=True)
         elif ch in (ord("g"), curses.KEY_HOME):
-            cursor_move(-1000000); scroll_y = scroll_x = 0; redraw(); present(follow=True)
+            cursor_row = 0; scroll_y = scroll_x = 0; redraw(); present(follow=True)
         elif ch in (ord("G"), curses.KEY_END):
-            cursor_move(1000000); scroll_y = 10 ** 9      # clamped to the true bottom
-            redraw(); present()
+            cursor_row = 10 ** 9; redraw(); present(follow=True)   # clamped to bottom
         # raw viewport scroll for long content (e.g. the process list)
         elif ch == curses.KEY_NPAGE:
             scroll_y += max(1, stdscr.getmaxyx()[0] - 3); present()
@@ -1859,11 +1803,9 @@ def main(stdscr):
             elif bstate & (curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED):
                 # screen coords -> pad coords (content starts at screen row 1)
                 if 1 <= my <= stdscr.getmaxyx()[0] - 2:
-                    key = hit_target(mx + scroll_x, my - 1 + scroll_y)
-                    if key:
-                        cursor_key = key          # move selection to the click
-                        cursor_expand(None)       # and toggle it
-                        redraw(); present()
+                    cursor_row = my - 1 + scroll_y    # move selection to the click
+                    cursor_expand(None)              # toggle a target on that row
+                    redraw(); present()
 
         now = time.time()
         if now - last >= REFRESH:
