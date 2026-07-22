@@ -71,6 +71,10 @@ CLK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
 PAGE_KB = (os.sysconf("SC_PAGE_SIZE") // 1024) if hasattr(os, "sysconf") else 4
 NCPU = os.cpu_count() or 1
 CUR_JOB = os.path.basename(os.environ.get("CLAUDE_JOB_DIR", "").rstrip("/")) or None
+try:
+    ME = os.environ.get("USER") or pwd.getpwuid(os.getuid()).pw_name
+except Exception:
+    ME = os.environ.get("USER") or ""
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 EPOCH_UTC = datetime(1970, 1, 1, tzinfo=timezone.utc)  # sort fallback for jobs
@@ -599,7 +603,8 @@ def get_nodes():
             except ValueError:
                 a = t = 0
         d = {"node": name, "state": state.strip(),
-             "cpus_alloc": a, "cpus_total": t, "users": set()}
+             "cpus_alloc": a, "cpus_total": t, "users": set(),
+             "user_cores": {}}          # user -> cores in use on this node
         nodes.append(d)
         index[name] = d
 
@@ -608,7 +613,7 @@ def get_nodes():
     expand = {}   # nodelist -> [hostnames], cached within this call
     try:
         q = subprocess.run(
-            ["squeue", "-h", "-t", "RUNNING", "-o", "%N\x1f%u"],
+            ["squeue", "-h", "-t", "RUNNING", "-o", "%N\x1f%u\x1f%C"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True, timeout=6)
     except Exception:
@@ -616,9 +621,13 @@ def get_nodes():
     if q is not None and q.returncode == 0:
         for line in q.stdout.splitlines():
             parts = line.split("\x1f")
-            if len(parts) != 2:
+            if len(parts) != 3:
                 continue
             nodelist, user = parts[0].strip(), parts[1].strip()
+            try:
+                cores = int(parts[2].strip())
+            except ValueError:
+                cores = 0
             if not nodelist:
                 continue
             if "[" in nodelist:
@@ -639,6 +648,7 @@ def get_nodes():
                 d = index.get(h)
                 if d is not None:
                     d["users"].add(user)
+                    d["user_cores"][user] = d["user_cores"].get(user, 0) + cores
 
     for d in nodes:
         d["users"] = sorted(d["users"])
@@ -916,6 +926,7 @@ def section(scr, y, title, right=""):
 # that the main loop tests a mouse click against. Keys: "jobs", "slurm", "node".
 # ---------------------------------------------------------------------------
 _expanded = {"jobs": False, "slurm": False, "node": False, "nodes": False}
+_expanded_node_rows = set()   # NODES-panel node names drilled open (cores-by-user)
 _click_targets = []
 
 
@@ -1312,8 +1323,11 @@ def draw_nodes(scr, y, nodes, maxrows):
 
     # busy first (has users, or alloc/mix), then idle, then down/other; name
     # order inside each bucket -- keeps the useful rows visible while collapsed.
+    # your nodes first, then busy, then idle, then down/other; name order within.
     def rank(d):
         b = _node_base_state(d["state"])
+        if ME and ME in d["users"]:
+            return -1                           # my nodes pinned to the very top
         if d["users"] or b in ("alloc", "mix"):
             return 0
         if b == "idle":
@@ -1326,7 +1340,7 @@ def draw_nodes(scr, y, nodes, maxrows):
     if hidden > 0 or _expanded["nodes"]:
         draw_toggle(scr, hy, title, "nodes")
 
-    scr.addstr(y, 2, "%-14s %-9s %-9s %s" % ("node", "state", "cpu", "users"),
+    scr.addstr(y, 2, "  %-12s %-9s %-9s %s" % ("node", "state", "cpu", "users"),
                cp(C_DIM) | curses.A_UNDERLINE)
     y += 1
     if not ordered:
@@ -1337,14 +1351,32 @@ def draw_nodes(scr, y, nodes, maxrows):
         if y >= scr.h - 1:                      # never draw over the footer row
             break
         short = d["node"].split(".")[0]         # drop the .abc0 domain for width
-        scr.addstr(y, 2, "%-14s" % short[:14], cp(C_DIM))
+        mine = bool(ME and ME in d["users"])
+        opened = d["node"] in _expanded_node_rows
+        # a node with jobs on it is click-to-expand into its per-user core split
+        expandable = bool(d["user_cores"])
+        glyph = ("▾ " if opened else "▸ ") if expandable else "  "
+        scr.addstr(y, 2, glyph, cp(C_YELLOW))
+        scr.addstr(y, 4, "%-12s" % short[:12],
+                   (cp(C_GREEN) | curses.A_BOLD) if mine else cp(C_DIM))
         scr.addstr(y, 17, "%-9s" % d["state"][:9], _node_attr(d["state"]))
         scr.addstr(y, 27, "%2d/%-2d" % (d["cpus_alloc"], d["cpus_total"]),
                    cp(C_DIM))
         if d["users"]:
-            who = ", ".join(d["users"])
+            who = "/".join(d["users"])          # multiple users separated by /
             scr.addstr(y, 37, who[:max(0, scr.w - 38)], cp(C_CYAN))
+        if expandable:                          # whole row is the click target
+            add_target(y, 2, scr.w, "node:" + d["node"])
         y += 1
+        # drilled open: one indented line per user with their core count on it
+        if opened and d["user_cores"]:
+            for u, c in sorted(d["user_cores"].items(), key=lambda kv: (-kv[1], kv[0])):
+                if y >= scr.h - 1:
+                    break
+                a = (cp(C_GREEN) | curses.A_BOLD) if u == ME else cp(C_DIM)
+                scr.addstr(y, 6, "%-14s %d core%s" %
+                           (u[:14], c, "" if c == 1 else "s"), a)
+                y += 1
 
     y = draw_more(scr, y, "nodes", hidden)
     return y + 1
@@ -1588,7 +1620,12 @@ def main(stdscr):
                 # is scrolled by (scroll_y, scroll_x) -- translate to pad coords.
                 if 1 <= my <= stdscr.getmaxyx()[0] - 2:
                     key = hit_target(mx + scroll_x, my - 1 + scroll_y)
-                    if key:
+                    if key and key.startswith("node:"):
+                        n = key[5:]
+                        _expanded_node_rows.discard(n) if n in _expanded_node_rows \
+                            else _expanded_node_rows.add(n)
+                        last = 0.0
+                    elif key:
                         _expanded[key] ^= True
                         last = 0.0
 

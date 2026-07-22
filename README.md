@@ -36,9 +36,11 @@ timer. Six panels:
    collapsed into a single in-queue count with a per-reason breakdown.
 4. **Nodes** — every compute node's SLURM state (idle / allocated / mixed /
    down / drained), a category tally in the header (`7 alloc · 5 mix · 3 idle
-   · 24 down`), and — for the busy ones — who's running on them. Busy nodes
-   sort to the top; the long tail of `down` nodes collapses behind a `▾ N more`
-   expander. From `sinfo` + `squeue`, timeout-guarded.
+   · 24 down`), and — for the busy ones — who's running on them (multiple
+   users on a shared node are shown `userA/userB`). **Your** nodes are pinned to
+   the very top and highlighted; **click any busy node** (or the `▸`) to drill it
+   open into a per-user core breakdown, so you see who holds what without wading
+   through a wall of individual jobs. From `sinfo` + `squeue`, timeout-guarded.
 5. **Storage** — a usage bar per shared cluster filesystem (every `/clusterfs`
    pool this node can see, auto-discovered from `/proc/mounts`). Each pool is
    `df`'d on a background thread with a per-mount timeout, so a slow or hung NFS
