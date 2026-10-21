@@ -117,6 +117,17 @@ COST_CACHE_WRITE = 6.25 # $ / 1M cache-write tokens   (~1.25x input, 5-min TTL)
 COST_IN_FRAC = 0.8
 COST_PER_MTOK = COST_IN_FRAC * COST_OPUS_IN + (1 - COST_IN_FRAC) * COST_OPUS_OUT  # ~$9/1M
 
+# Context fill shown per agent: the size of the agent's most recent request
+# (input + cache read + cache write on its last main-thread turn) over the
+# model's context window. Current Opus/Sonnet/Fable sessions here run 1M windows
+# (requests of 500-760k are seen); Haiku is 200k.
+CONTEXT_WINDOW = 1000000
+CONTEXT_WINDOW_SMALL = 200000
+
+
+def context_window(model):
+    return CONTEXT_WINDOW_SMALL if model and "haiku" in model else CONTEXT_WINDOW
+
 # ---------------------------------------------------------------------------
 # time helpers
 # ---------------------------------------------------------------------------
@@ -563,7 +574,8 @@ def agent_usage(session_id):
         return None
     c = _cost_cache.get(path)
     if c is None or size < c["off"]:      # new file, or truncated/replaced -> reset
-        c = {"off": 0, "inp": 0, "cr": 0, "cc": 0, "out": 0, "cmp": 0, "model": None}
+        c = {"off": 0, "inp": 0, "cr": 0, "cc": 0, "out": 0, "cmp": 0, "model": None,
+             "ctx": None}
         _cost_cache[path] = c
     if size > c["off"]:
         try:
@@ -598,10 +610,15 @@ def agent_usage(session_id):
                 c["cr"] += u.get("cache_read_input_tokens") or 0
                 c["cc"] += u.get("cache_creation_input_tokens") or 0
                 c["out"] += u.get("output_tokens") or 0
-    cost = (c["inp"] / 1e6 * COST_OPUS_IN + c["cr"] / 1e6 * COST_CACHE_READ +
+                if not e.get("isSidechain"):    # latest main-thread request = context now
+                    c["ctx"] = ((u.get("input_tokens") or 0) +
+                                (u.get("cache_read_input_tokens") or 0) +
+                                (u.get("cache_creation_input_tokens") or 0))
+    cost =(c["inp"] / 1e6 * COST_OPUS_IN + c["cr"] / 1e6 * COST_CACHE_READ +
             c["cc"] / 1e6 * COST_CACHE_WRITE + c["out"] / 1e6 * COST_OPUS_OUT)
     return {"tokens": c["inp"] + c["cr"] + c["cc"] + c["out"],
-            "cost": cost, "compactions": c["cmp"], "model": c["model"]}
+            "cost": cost, "compactions": c["cmp"], "model": c["model"],
+            "ctx": c["ctx"]}
 
 
 def get_jobs():
@@ -618,6 +635,7 @@ def get_jobs():
             d["_life_tokens"] = u["tokens"]
             d["_cost"] = u["cost"]
             d["_compactions"] = u["compactions"]
+            d["_ctx"] = u["ctx"]
             if u["model"]:
                 d["_model"] = u["model"]
         jobs.append(d)
@@ -1255,8 +1273,9 @@ def draw_jobs(scr, y, jobs, maxrows):
     limit = len(jobs) if _expanded["jobs"] else maxrows
     if hidden > 0 or _expanded["jobs"]:
         draw_toggle(scr, hy, title, "jobs")
-    scr.addstr(y, 2, "%-20s %-12s %6s %7s %3s %-9s %-10s %s" %
-               ("name", "status", "tokens", "cost", "cmp", "model", "updated", "detail"),
+    scr.addstr(y, 2, "%-20s %-12s %6s %7s %3s %-9s %-12s %-10s %s" %
+               ("name", "status", "tokens", "cost", "cmp", "model", "context",
+                "updated", "detail"),
                cp(C_DIM) | curses.A_UNDERLINE)
     y += 1
     if not jobs:
@@ -1280,7 +1299,7 @@ def draw_jobs(scr, y, jobs, maxrows):
         upd = ago(j.get("updatedAt"))
         detail = (j.get("detail") or j.get("needs") or "").replace("\n", " ")
         # columns: name@2(20) status@23(12) tokens@36(6) cost@43(7) cmp@51(3)
-        #          model@55(9) updated@65(10) detail@76
+        #          model@55(9) context@65(12) updated@78(10) detail@89
         scr.addstr(y, 0, star, cp(C_CYAN) | curses.A_BOLD)
         scr.addstr(y, 2, name[:20].ljust(20), curses.A_BOLD)
         scr.addstr(y, 23, label[:12].ljust(12), col)
@@ -1288,8 +1307,16 @@ def draw_jobs(scr, y, jobs, maxrows):
         scr.addstr(y, 43, cost.rjust(7), cp(C_GREEN))
         scr.addstr(y, 51, cmp_s.rjust(3), cp(C_DIM))
         scr.addstr(y, 55, model[:9].ljust(9), cp(C_CYAN))
-        scr.addstr(y, 65, upd[:10].ljust(10), cp(C_DIM))
-        scr.addstr(y, 76, detail, cp(C_DIM))
+        ctx = j.get("_ctx")
+        if isinstance(ctx, int) and ctx > 0:
+            pct = 100.0 * ctx / context_window(j.get("_model"))
+            ccol = cp(C_RED) if pct >= 80 else cp(C_YELLOW) if pct >= 50 else cp(C_GREEN)
+            scr.addstr(y, 65, bar(pct, 6), ccol)
+            scr.addstr(y, 72, ("%d%%" % min(100, int(pct))).rjust(4), ccol)
+        else:
+            scr.addstr(y, 65, "-".ljust(12), cp(C_DIM))
+        scr.addstr(y, 78, upd[:10].ljust(10), cp(C_DIM))
+        scr.addstr(y, 89, detail, cp(C_DIM))
         y += 1
     y = draw_more(scr, y, "jobs", hidden)
     return y + 1
