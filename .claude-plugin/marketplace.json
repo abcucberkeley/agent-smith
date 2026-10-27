@@ -1,0 +1,16 @@
+{
+  "name": "agent-smith",
+  "owner": {
+    "name": "Advanced Bioimaging Center"
+  },
+  "metadata": {
+    "description": "Agent Smith: a read-only dashboard of Claude usage, background agents and SLURM, as a Claude Code pane."
+  },
+  "plugins": [
+    {
+      "name": "agent-smith",
+      "source": "./claude-plugin",
+      "description": "Agent Smith dashboard as a pane inside Claude Code and the Claude desktop app."
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "name": "agent-smith",
+  "version": "0.1.0",
+  "description": "Agent Smith dashboard as a pane: Claude usage limits, every background agent with its context fill, and (on or via SSH to the cluster) SLURM jobs and storage.",
+  "author": {
+    "name": "Advanced Bioimaging Center"
+  },
+  "license": "BSD-2-Clause",
+  "repository": "https://github.com/abcucberkeley/agent-smith",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "cluster_host": {
+      "type": "string",
+      "title": "Cluster SSH host",
+      "description": "user@host to reach SLURM and /clusterfs over SSH (key login, no password). Leave empty on the cluster itself, or to hide the cluster panels.",
+      "default": ""
+    }
+  }
+}

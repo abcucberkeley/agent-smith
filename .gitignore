@@ -221,3 +221,6 @@ __marimo__/
 .credentials.json
 .claude/
 *.log
+
+# written by Claude Code when it loads the plugin
+claude-plugin/.claude-plugin/types/

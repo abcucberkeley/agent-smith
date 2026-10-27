@@ -107,6 +107,20 @@ red `needs-prompt`, cyan `idle`. The `[+]` after a panel title (and the
 select, →← to open/close); `[-]` / `▴` collapses. All
 names/users/values above are fictional.)
 
+
+## Inside Claude Code / the Claude desktop app
+
+The same dashboard also comes as a Claude Code plugin that draws it as a pane
+beside the chat, including in the desktop app's Code tab on Windows. Install it
+from the desktop app with **+ → Plugins → Add marketplace**
+`abcucberkeley/agent-smith` → **Add plugin**, or from a terminal session:
+
+```
+/plugin install agent-smith --marketplace abcucberkeley/agent-smith
+```
+
+Details in [`claude-plugin/README.md`](claude-plugin/README.md).
+
 ## Requirements
 
 - **Linux.** The usage panel reads your OAuth token from
